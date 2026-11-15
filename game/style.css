@@ -1,0 +1,55 @@
+/* Mothlight page shell: a deep-night frame that centres the garden canvas
+   and lets it shrink to fit any desktop window without distortion. */
+
+:root {
+  --night: #06070f;
+  --night-2: #0b0e1e;
+  --lantern: #ffd98a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background:
+    radial-gradient(120% 90% at 50% 0%, var(--night-2) 0%, var(--night) 62%),
+    var(--night);
+  color: var(--lantern);
+  font-family: "Trebuchet MS", Verdana, Geneva, sans-serif;
+}
+
+#stage {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+canvas#game {
+  display: block;
+  width: min(1280px, 100%, calc((100vh - 36px) * 1.6));
+  height: auto;
+  aspect-ratio: 8 / 5;
+  border-radius: 10px;
+  box-shadow:
+    0 0 0 1px rgba(255, 217, 138, 0.14),
+    0 18px 60px rgba(0, 0, 0, 0.75),
+    0 0 90px rgba(255, 183, 77, 0.07);
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  background: #0a0c1a;
+}
+
+.noscript {
+  text-align: center;
+  padding: 24px;
+}
