@@ -94,6 +94,10 @@ const Sound = {
       case "bossRoar": this.tone(98, 49, 0.7, "sawtooth", 0.2); this.noise(0.6, 300, 0.14); this.tone(147, 73, 0.7, "square", 0.08, null, 0.05); break;
       case "bossDie": this.noise(0.7, 500, 0.22); [262, 330, 392, 523, 659, 784].forEach((f, i) => this.tone(f, 0, 0.3, "triangle", 0.1, null, i * 0.06)); break;
       case "gameOver": [392, 330, 262, 196].forEach((f, i) => this.tone(f, 0, 0.34, "triangle", 0.11, null, i * 0.17)); break;
+      case "pulse":  this.tone(196, 392, 0.35, "sine", 0.1); this.tone(392, 784, 0.3, "sine", 0.05, null, 0.05); break;
+      case "kindle": [659, 784, 988, 1318].forEach((f, i) => this.tone(f, 0, 0.22, "triangle", 0.09, null, i * 0.06)); break;
+      case "finalForm": [523, 659, 784, 1046, 1318].forEach((f, i) => this.tone(f, 0, 0.26, "triangle", 0.1, null, i * 0.055)); this.noise(0.4, 5200, 0.04, 0.1); break;
+      case "shift":  this.tone(82, 247, 0.6, "sawtooth", 0.06); this.noise(0.5, 420, 0.08); break;
       case "ui":     this.tone(700, 0, 0.05, "triangle", 0.06); break;
     }
   },

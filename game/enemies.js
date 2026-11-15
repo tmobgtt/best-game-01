@@ -40,7 +40,8 @@ class Enemy {
     this.hp = 1; this.maxHp = 1; this.radius = 10; this.angle = 0;
     this.type = "moth"; this.def = ENEMY_TYPES.moth; this.elite = false;
     this.state = "chase"; this.tState = 0; this.seed = 0; this.spawnT = 0;
-    this.flash = 0; this.burnT = 0; this.burnTick = 0; this.chillT = 0;
+    this.flash = 0; this.burnT = 0; this.burnTick = 0; this.burnRate = 0.8;
+    this.chillT = 0; this.chillFactor = 0.55;
     this.fireT = 0; this.lockAngle = 0; this.orbitDir = 1;
   }
 
@@ -56,13 +57,14 @@ class Enemy {
     this.elite = elite;
     this.alive = true; this.dying = false; this.counted = false;
     this.state = "chase"; this.tState = rand(0, 0.4); this.seed = rand(0, Math.PI * 2);
-    this.spawnT = 0; this.flash = 0; this.burnT = 0; this.burnTick = 0; this.chillT = 0;
+    this.spawnT = 0; this.flash = 0; this.burnT = 0; this.burnTick = 0; this.burnRate = 0.8;
+    this.chillT = 0; this.chillFactor = 0.55;
     this.fireT = rand(0.8, 2);
     this.orbitDir = Math.random() < 0.5 ? -1 : 1;
     this.angle = 0;
   }
 
-  speedNow() { return this.speed * (this.chillT > 0 ? 0.55 : 1); }
+  speedNow() { return this.speed * (this.chillT > 0 ? this.chillFactor : 1); }
 
   // Returns "dead", "clank" (armour ate it) or "hit". Death itself is
   // reaped by main.js so score, drops and splitter children happen once.
@@ -80,8 +82,8 @@ class Enemy {
     const kb = this.type === "beetle" ? 26 : 62;
     this.kx += Math.cos(angle) * kb; this.ky += Math.sin(angle) * kb;
     if (opts) {
-      if (opts.burn) this.burnT = 2;
-      if (opts.chill) this.chillT = 1.6;
+      if (opts.burn) { this.burnT = 2; this.burnRate = opts.burnRate || 0.8; }
+      if (opts.chill) { this.chillT = opts.chillDur || 1.6; this.chillFactor = opts.chillFactor || 0.55; }
     }
     if (this.hp <= 0) { this.dying = true; return "dead"; }
     return clanked ? "clank" : "hit";
@@ -95,7 +97,7 @@ class Enemy {
     if (this.burnT > 0) {
       this.burnT -= dt; this.burnTick -= dt;
       if (this.burnTick <= 0) {
-        this.burnTick = 0.8; this.hp -= 1; this.flash = 0.06;
+        this.burnTick = this.burnRate; this.hp -= 1; this.flash = 0.06;
         Particles.trailDot(this.x + rand(-6, 6), this.y - 6, "#fb923c", 5, 0.4);
         if (this.hp <= 0) { this.dying = true; return; }
       }
@@ -295,7 +297,7 @@ const Boss = {
     this.active = true; this.dying = false; this.counted = false;
     this.phase = 1; this.t = 0; this.spawnAnim = 0;
     this.burstT = 2.6; this.spiralT = 0; this.spiralA = rand(0, 6);
-    this.spawnT = 2.2; this.chargeState = "stalk"; this.chargeT = 3.6; this.flash = 0;
+    this.spawnT = 2.2; this.chargeState = "stalk"; this.chargeT = 3.6; this.flash = 0; this.orbitT = 0;
   },
 
   takeHit(dmg, angle, opts) {

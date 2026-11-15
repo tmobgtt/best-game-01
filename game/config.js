@@ -123,3 +123,46 @@ const WAVE_EVENTS = [
   { id: "emberfall", name: "EMBERFALL", only: "beetle", note: "armor on the march" },
   { id: "dartstorm", name: "DART STORM", only: "dart", note: "they lunge together" },
 ];
+
+// THE LIGHT LADDER — the game's headline mechanic. The lantern does not
+// stay what it was: at each named wave it visibly grows. The pool of
+// light widens every single wave; at wave 3 it learns to pulse, at wave 4
+// creatures standing in it are light-struck and take bonus damage, at
+// wave 5 a second flame joins it, and the pulses keep quickening.
+// lightStageFor(wave) resolves the current rung.
+const LIGHT_STAGES = [
+  { wave: 1, name: "KINDLED", note: "a bare flame against the dark", pulse: 0, pulseDmg: 0, struck: false, twin: false },
+  { wave: 2, name: "EMBER VEIL", note: "the light widens, the dark thins", pulse: 0, pulseDmg: 0, struck: false, twin: false },
+  { wave: 3, name: "DAWNBREAK RING", note: "the lantern learns to pulse", pulse: 6, pulseDmg: 1, struck: false, twin: false },
+  { wave: 4, name: "PRISM HEART", note: "foes in the light are light-struck", pulse: 6, pulseDmg: 1, struck: true, twin: false },
+  { wave: 5, name: "TWIN FLAME", note: "a second flame keeps the vigil", pulse: 5.4, pulseDmg: 1, struck: true, twin: true },
+  { wave: 7, name: "REFRACTION", note: "the pulses bite deeper", pulse: 5, pulseDmg: 2, struck: true, twin: true },
+  { wave: 9, name: "CORONA", note: "a small sun, and still growing", pulse: 4.2, pulseDmg: 2, struck: true, twin: true },
+];
+
+function lightStageFor(wave) {
+  let stage = LIGHT_STAGES[0];
+  for (const s of LIGHT_STAGES) if (wave >= s.wave) stage = s;
+  return stage;
+}
+
+// FINAL FORMS — every draft blessing, maxed out, wakes into a stronger
+// named shape. The card shows the form before you commit to it, the
+// game-over screen gilds the ones you woke, and player.js implements
+// each effect from the stack counts.
+const FINAL_FORMS = {
+  twin:     { name: "CONSTELLATION", desc: "+1 spark, and sparks bend toward foes." },
+  rapid:    { name: "SUNCORE ENGINE", desc: "every 4th volley burns twice as bright." },
+  bright:   { name: "WHITE FLAME", desc: "kills burst in a ring of fire." },
+  pierce:   { name: "THE LONG DAWN", desc: "sparks pierce +1 more enemy." },
+  bounce:   { name: "ECHO LANTERN", desc: "sparks ricochet +1 more time." },
+  ember:    { name: "WILDFIRE HEART", desc: "burns bite twice as fast." },
+  frost:    { name: "FIRST SNOW", desc: "chills bite deeper and last longer." },
+  swift:    { name: "GALELIGHT", desc: "faster still, and the dash returns sooner." },
+  longdash: { name: "COMET'S TAIL", desc: "the dash sears what it crosses." },
+  magnet:   { name: "EVENTIDE PULL", desc: "shards answer from anywhere in the dark." },
+  heart:    { name: "EVERGREEN", desc: "each new wave mends one heart." },
+  aegis:    { name: "HALO OF DAWN", desc: "the shield regrows, even mid-wave." },
+  orbit:    { name: "BINARY SUNS", desc: "a third guardian joins the circle." },
+  charm:    { name: "PERFECT CHAIN", desc: "the combo can climb to x10." },
+};

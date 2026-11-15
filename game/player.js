@@ -16,12 +16,26 @@ const Bullets = {
     b.hits.length = 0;
   },
   update(dt) {
+    const stats = Game.player.stats;
+    const trailColors = ["#fde68a", "#fcd34d", "#fbbf24", "#f0abfc", "#93c5fd", "#a5f3fc", "#fef9c3"];
+    const trail = trailColors[Math.min(trailColors.length - 1, Game.player.lightStageIdx)];
     this.pool.forEachAlive((b) => {
       b.life -= dt;
       if (b.life <= 0) { b.alive = false; return; }
+      // CONSTELLATION homing: sparks bend toward the nearest foe.
+      if (stats.homing > 0) {
+        const t = Game.nearestEnemy(b.x, b.y, 320, b.hits);
+        if (t) {
+          const cur = Math.atan2(b.vy, b.vx);
+          const want = Math.atan2(t.y - b.y, t.x - b.x);
+          const turn = clamp(angleDelta(cur, want), -stats.homing * dt, stats.homing * dt);
+          const na = cur + turn, sp = Math.hypot(b.vx, b.vy);
+          b.vx = Math.cos(na) * sp; b.vy = Math.sin(na) * sp;
+        }
+      }
       b.x += b.vx * dt; b.y += b.vy * dt;
       if (b.x < -16 || b.x > CFG.width + 16 || b.y < -16 || b.y > CFG.height + 16) b.alive = false;
-      if (Math.random() < dt * 22) Particles.trailDot(b.x, b.y, "#fde68a", 2.4, 0.22);
+      if (Math.random() < dt * 22) Particles.trailDot(b.x, b.y, trail, 2.4, 0.22);
     });
   },
   draw(ctx) {
@@ -51,6 +65,10 @@ class Player {
     this.prevDashDown = false;
     this.blessingId = null; this.blessingT = 0; this.blessingIdx = -1;
     this.shieldReady = false;
+    this.shieldBrokenT = 0;
+    this.volley = 0;
+    this.dashId = 0;
+    this.lightStageIdx = 0;
     this.orbitAngle = 0;
     this.orbitPositions = [];
     this.stats = {};
@@ -60,23 +78,40 @@ class Player {
 
   // All draft-derived numbers are recomputed from the stack counts, so
   // upgrades.js never has to know the formulas and save order is safe.
+  // Maxing a blessing wakes its FINAL FORM (config.js): fin(id) is 1
+  // when the stack is full, and each form bends one line below.
   recomputeStats() {
     const s = Upgrades.stacks;
     const get = (id) => s[id] || 0;
+    const fin = (id) => {
+      const def = UPGRADE_POOL.find((d) => d.id === id);
+      return def && get(id) >= def.max ? 1 : 0;
+    };
     this.stats = {
       damage: CFG.playerDamage + get("bright"),
       fireRate: CFG.playerFireRate * Math.pow(1.22, get("rapid")),
-      projectiles: 1 + get("twin"),
-      pierce: get("pierce"),
-      bounces: get("bounce"),
+      projectiles: 1 + get("twin") + fin("twin"),
+      homing: fin("twin") ? 1.5 : 0,
+      novaEvery: fin("rapid") ? 4 : 0,
+      explodeKills: fin("bright") > 0,
+      pierce: get("pierce") + fin("pierce"),
+      bounces: get("bounce") + fin("bounce"),
       burn: get("ember") > 0,
+      burnRate: fin("ember") ? 0.4 : 0.8,
       chill: get("frost") > 0,
-      speed: CFG.playerSpeed * Math.pow(1.11, get("swift")),
-      dashCooldown: CFG.dashCooldown * Math.pow(0.75, get("longdash")),
+      chillFactor: fin("frost") ? 0.4 : 0.55,
+      chillDur: fin("frost") ? 2.4 : 1.6,
+      speed: CFG.playerSpeed * Math.pow(1.11, get("swift")) * (fin("swift") ? 1.06 : 1),
+      dashCooldown: CFG.dashCooldown * Math.pow(0.75, get("longdash")) * (fin("swift") ? 0.85 : 1),
       dashTime: CFG.dashTime * (1 + 0.18 * get("longdash")),
+      dashDamage: fin("longdash") ? 2 : 0,
       magnetR: 74 * Math.pow(1.7, get("magnet")),
-      orbits: get("orbit"),
+      globalMagnet: fin("magnet") > 0,
+      waveHeal: fin("heart"),
+      shieldRegrowTime: fin("aegis") ? 14 : 0,
+      orbits: get("orbit") + fin("orbit"),
       comboWindow: CFG.comboWindow * Math.pow(1.6, get("charm")),
+      comboMax: CFG.comboMax + (fin("charm") ? 2 : 0),
     };
     const newMax = CFG.startHearts + get("heart");
     if (newMax !== this.maxHearts) {
@@ -91,6 +126,17 @@ class Player {
   onWaveStart() {
     if ((Upgrades.stacks["aegis"] || 0) > 0) this.shieldReady = true;
     this.shieldRegrow = false;
+    this.shieldBrokenT = 0;
+    // EVERGREEN, the heart's final form: a new wave mends one heart.
+    if (this.stats.waveHeal && this.hearts < this.maxHearts) {
+      this.heal(1);
+      Sound.sfx("heal");
+    }
+  }
+
+  // The lantern's reach: it widens every wave, without exception.
+  lightRadius() {
+    return Math.min(400, 185 * (1 + 0.08 * Math.max(0, Director.wave - 1)));
   }
 
   grantBlessing() {
@@ -108,6 +154,18 @@ class Player {
       this.blessingT -= dt;
       if (this.blessingT <= 0) this.blessingId = null;
     }
+    const stage = lightStageFor(Math.max(1, Director.wave));
+    this.lightStageIdx = LIGHT_STAGES.indexOf(stage);
+    // HALO OF DAWN: a broken shield regrows after a while, mid-wave.
+    if (!this.shieldReady && this.stats.shieldRegrowTime > 0) {
+      this.shieldBrokenT += dt;
+      if (this.shieldBrokenT >= this.stats.shieldRegrowTime) {
+        this.shieldReady = true;
+        this.shieldBrokenT = 0;
+        Sound.sfx("shieldUp");
+        Particles.ring(this.x, this.y, "#38bdf8", 50, 0.35, 3);
+      }
+    }
     const mv = Input.moveVector();
     const aim = Input.aimPoint(this.x, this.y);
     this.angle = Math.atan2(aim.y - this.y, aim.x - this.x);
@@ -121,6 +179,7 @@ class Player {
       this.dashDirX = dx / len; this.dashDirY = dy / len;
       this.dashT = this.stats.dashTime;
       this.dashCdT = this.stats.dashCooldown;
+      this.dashId++;
       Sound.sfx("dash");
       Particles.burst(this.x, this.y, { n: 8, color: "#fde68a", speed: 120, size: 2.6, life: 0.3 });
     }
@@ -154,14 +213,22 @@ class Player {
       if (this.blessingId === "rapid") rate *= 1.65;
       if (this.blessingId === "spread") projectiles += 2;
       this.fireT = 1 / rate;
+      this.volley++;
+      // SUNCORE ENGINE: every fourth volley burns twice as bright.
+      const nova = this.stats.novaEvery > 0 && this.volley % this.stats.novaEvery === 0;
+      const dmg = this.stats.damage * (nova ? 2 : 1);
       const fan = Math.min(0.55, (projectiles - 1) * 0.1);
       for (let i = 0; i < projectiles; i++) {
         const t = projectiles === 1 ? 0 : (i / (projectiles - 1) - 0.5) * 2;
         Bullets.fire(
           this.x + Math.cos(this.angle) * 16, this.y + Math.sin(this.angle) * 16,
           this.angle + t * fan,
-          this.stats.damage, this.stats.pierce, this.stats.bounces,
+          dmg, this.stats.pierce, this.stats.bounces,
         );
+      }
+      if (nova) {
+        Particles.ring(this.x, this.y, "#fdba74", 40, 0.28, 2);
+        Sound.sfx("pick");
       }
       Sound.sfx("shoot");
       Particles.burst(this.x + Math.cos(this.angle) * 20, this.y + Math.sin(this.angle) * 20,
@@ -204,10 +271,10 @@ class Player {
 
   draw(ctx, time) {
     const flicker = 1 + Math.sin(time * 11) * 0.05 + Math.sin(time * 23) * 0.03;
-    // Lantern light pool.
+    // Lantern light pool: its size IS the light ladder, visible at a glance.
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    const glowS = 190 * flicker;
+    const glowS = this.lightRadius() * 1.18 * flicker;
     ctx.globalAlpha = this.invulnT > 0 && Math.floor(time * 14) % 2 ? 0.35 : 0.75;
     ctx.drawImage(Sprites.glow("#f59e0b"), this.x - glowS / 2, this.y - glowS / 2, glowS, glowS);
     ctx.restore();
@@ -230,6 +297,20 @@ class Player {
       ctx.lineDashOffset = -time * 24;
       ctx.beginPath(); ctx.arc(this.x, this.y, this.radius + 9, 0, Math.PI * 2); ctx.stroke();
       ctx.restore();
+    }
+    // TWIN FLAME: from wave 5 a second, smaller flame keeps the vigil,
+    // circling the keeper and doubling the light the eye can see.
+    if (lightStageFor(Math.max(1, Director.wave)).twin) {
+      const ta = time * 0.85;
+      const tx = this.x + Math.cos(ta) * 76, ty = this.y + Math.sin(ta) * 76;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const ts = 74 * flicker;
+      ctx.globalAlpha = 0.65;
+      ctx.drawImage(Sprites.glow("#fcd34d"), tx - ts / 2, ty - ts / 2, ts, ts);
+      ctx.restore();
+      ctx.fillStyle = "#fef3c7";
+      ctx.beginPath(); ctx.arc(tx, ty, 3.6, 0, Math.PI * 2); ctx.fill();
     }
     // The keeper: a small hooded robe, a bright flame where the face is.
     ctx.save();

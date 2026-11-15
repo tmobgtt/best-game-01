@@ -55,9 +55,17 @@ const Upgrades = {
     player.recomputeStats();
     if (def.id === "heart") player.heal(1);
     if (def.id === "aegis") player.shieldReady = true;
-    Sound.sfx("pick");
-    Particles.burst(player.x, player.y, { n: 22, color: "#fde68a", speed: 200, size: 3.2, life: 0.6 });
-    Particles.ring(player.x, player.y, "#fde68a", 84, 0.45, 3);
+    const wokeFinalForm = this.count(def.id) >= def.max && FINAL_FORMS[def.id];
+    if (wokeFinalForm) {
+      Sound.sfx("finalForm");
+      Particles.text(player.x, player.y - 44, "FINAL FORM — " + FINAL_FORMS[def.id].name, "#facc15", 21);
+      Particles.burst(player.x, player.y, { n: 34, color: "#facc15", speed: 260, size: 3.4, life: 0.7 });
+      Particles.ring(player.x, player.y, "#facc15", 120, 0.55, 4);
+    } else {
+      Sound.sfx("pick");
+      Particles.burst(player.x, player.y, { n: 22, color: "#fde68a", speed: 200, size: 3.2, life: 0.6 });
+      Particles.ring(player.x, player.y, "#fde68a", 84, 0.45, 3);
+    }
     const cb = this.onPick;
     this.choices = [];
     this.onPick = null;
@@ -245,6 +253,12 @@ const Upgrades = {
       ctx.font = "400 17px 'Trebuchet MS', sans-serif";
       const lines = this.wrap(ctx, def.desc, cw - 44);
       lines.forEach((ln, li) => ctx.fillText(ln, x + cw / 2, y + 214 + li * 23));
+      // One stack from full: show the final form this pick would wake.
+      if (owned === def.max - 1 && FINAL_FORMS[def.id]) {
+        ctx.fillStyle = "#facc15";
+        ctx.font = "700 14px 'Trebuchet MS', sans-serif";
+        ctx.fillText("FINAL FORM: " + FINAL_FORMS[def.id].name, x + cw / 2, y + 214 + lines.length * 23 + 8);
+      }
       // Stack pips: filled for owned, hollow for remaining.
       for (let p = 0; p < def.max; p++) {
         const px = x + cw / 2 + (p - (def.max - 1) / 2) * 20;
