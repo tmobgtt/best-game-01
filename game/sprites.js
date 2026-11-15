@@ -140,14 +140,16 @@ const Sprites = {
     g.globalAlpha = 1;
     g.fillStyle = BOSS_DEF.color;
     g.beginPath(); g.ellipse(cx, cy, r * 0.78, r * 1.02, 0, 0, Math.PI * 2); g.fill();
+    g.fillStyle = "rgba(255,255,255,0.4)";
+    g.beginPath(); g.ellipse(cx, cy - r * 0.12, r * 0.34, r * 0.42, 0, 0, Math.PI * 2); g.fill();
     g.fillStyle = BOSS_DEF.dark;
-    g.beginPath(); g.ellipse(cx, cy + r * 0.36, r * 0.52, r * 0.62, 0, 0, Math.PI * 2); g.fill();
+    g.beginPath(); g.ellipse(cx, cy + r * 0.44, r * 0.4, r * 0.48, 0, 0, Math.PI * 2); g.fill();
     const crown = enraged ? "#f87171" : "#facc15";
     g.fillStyle = crown;
     for (let i = -2; i <= 2; i++) {
       const px = cx + i * r * 0.34, py = cy - r * 1.08 - Math.abs(i) * -r * 0.06;
       g.save(); g.translate(px, py); g.rotate(i * 0.3);
-      g.beginPath(); g.ellipse(0, 0, r * 0.13, r * 0.26, 0, 0, Math.PI * 2); g.fill();
+      g.beginPath(); g.ellipse(0, 0, r * 0.16, r * 0.3, 0, 0, Math.PI * 2); g.fill();
       g.restore();
     }
     g.fillStyle = enraged ? "#fecaca" : "#fff7d6";

@@ -253,11 +253,12 @@ const Upgrades = {
       ctx.font = "400 17px 'Trebuchet MS', sans-serif";
       const lines = this.wrap(ctx, def.desc, cw - 44);
       lines.forEach((ln, li) => ctx.fillText(ln, x + cw / 2, y + 214 + li * 23));
-      // One stack from full: show the final form this pick would wake.
+      // One stack from full: the gold line replaces the owned count and
+      // names the final form this pick would wake.
       if (owned === def.max - 1 && FINAL_FORMS[def.id]) {
         ctx.fillStyle = "#facc15";
         ctx.font = "700 14px 'Trebuchet MS', sans-serif";
-        ctx.fillText("FINAL FORM: " + FINAL_FORMS[def.id].name, x + cw / 2, y + 214 + lines.length * 23 + 8);
+        ctx.fillText("FINAL FORM: " + FINAL_FORMS[def.id].name, x + cw / 2, y + 268);
       }
       // Stack pips: filled for owned, hollow for remaining.
       for (let p = 0; p < def.max; p++) {
@@ -266,7 +267,7 @@ const Upgrades = {
         if (p < owned) { ctx.fillStyle = "#facc15"; ctx.fill(); }
         else { ctx.strokeStyle = "#8b7fb8"; ctx.lineWidth = 1.6; ctx.stroke(); }
       }
-      if (owned > 0) {
+      if (owned > 0 && owned !== def.max - 1) {
         ctx.fillStyle = "#a5b4fc";
         ctx.font = "400 14px 'Trebuchet MS', sans-serif";
         ctx.fillText("owned x" + owned, x + cw / 2, y + 268);
