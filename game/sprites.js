@@ -1,196 +1,161 @@
-// sprites.js — every glow and creature body is painted ONCE onto an
-// offscreen canvas here, so the frame loop only ever blits images.
-// Per-frame gradients and shadowBlur are what made the first Mothlight
-// dip on weak machines; this file is the fix, kept separate so the
-// painters can grow without touching the systems that use them.
+// sprites.js — every creature, tower and glow is drawn once to an offscreen
+// canvas at boot; the frame loop only blits images and never pays for
+// gradients or shadowBlur in the hot path.
+"use strict";
 
-const Sprites = {
-  glowCache: new Map(),
-  bodyCache: new Map(),
-  heartLit: null,
-  heartDark: null,
-  shardImg: null,
+function cnv(w, h) { const c = document.createElement("canvas"); c.width = w; c.height = h; return c; }
+function glowDisc(color, r) {
+  const c = cnv(r * 2, r * 2), x = c.getContext("2d");
+  const g = x.createRadialGradient(r, r, 0, r, r, r);
+  g.addColorStop(0, color); g.addColorStop(0.35, color + "aa"); g.addColorStop(1, color + "00");
+  x.fillStyle = g; x.fillRect(0, 0, r * 2, r * 2);
+  return c;
+}
+function orb(color, r) {
+  const c = cnv(r * 2 + 4, r * 2 + 4), x = c.getContext("2d"), cx = r + 2;
+  const g = x.createRadialGradient(cx - r * 0.35, cx - r * 0.4, 1, cx, cx, r);
+  g.addColorStop(0, "#ffffff"); g.addColorStop(0.35, color); g.addColorStop(1, "#1a2138");
+  x.fillStyle = g; x.beginPath(); x.arc(cx, cx, r, 0, 7); x.fill();
+  return c;
+}
 
-  init() {
-    this.heartLit = this.paintHeart(true);
-    this.heartDark = this.paintHeart(false);
-    this.shardImg = this.paintShard();
-  },
-
-  // A soft radial glow dot: white heart, coloured halo, transparent rim.
-  glow(color) {
-    let img = this.glowCache.get(color);
-    if (img) return img;
-    const S = 64, c = makeCanvas(S, S), g = c.getContext("2d");
-    const grad = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
-    grad.addColorStop(0, "#ffffff");
-    grad.addColorStop(0.25, color);
-    grad.addColorStop(1, "rgba(0,0,0,0)");
-    g.fillStyle = grad;
-    g.fillRect(0, 0, S, S);
-    this.glowCache.set(color, c);
-    return c;
-  },
-
-  // Creature bodies are painted facing UP (head toward -y); callers
-  // rotate the blit to the heading. frame 0/1 is the wing beat.
-  body(type, elite, frame) {
-    const key = type + "|" + (elite ? "e" : "p") + "|" + frame;
-    let img = this.bodyCache.get(key);
-    if (img) return img;
-    const def = ENEMY_TYPES[type];
-    const r = def.radius * (elite ? 1.3 : 1);
-    const S = Math.ceil(r * 4.6);
-    const c = makeCanvas(S, S), g = c.getContext("2d");
-    const cx = S / 2, cy = S / 2;
-    this.paintWings(g, cx, cy, r, def, frame);
-    this.paintBody(g, cx, cy, r, def, type);
-    if (elite) {
-      g.strokeStyle = "#ffd75e";
-      g.lineWidth = 2.5;
-      g.beginPath(); g.arc(cx, cy, r * 1.18, 0, Math.PI * 2); g.stroke();
-      g.fillStyle = "#ffd75e";
-      for (let i = -1; i <= 1; i++) {
-        g.beginPath(); g.arc(cx + i * r * 0.5, cy - r * 1.28, 2.6, 0, Math.PI * 2); g.fill();
-      }
+function towerSprite(kind, def, level, ascended) {
+  const S = 128, c = cnv(S, S), x = c.getContext("2d"), cx = S / 2;
+  // stone base
+  x.fillStyle = "#2a3350"; x.beginPath(); x.arc(cx, cx, 40, 0, 7); x.fill();
+  x.fillStyle = "#39466b"; x.beginPath(); x.arc(cx, cx, 34, 0, 7); x.fill();
+  x.strokeStyle = ascended ? "#ffe98a" : "#55648c"; x.lineWidth = ascended ? 4 : 2;
+  x.beginPath(); x.arc(cx, cx, 34, 0, 7); x.stroke();
+  if (level >= 2) { x.strokeStyle = "#8fa5d6"; x.lineWidth = 2; x.beginPath(); x.arc(cx, cx, 27, 0, 7); x.stroke(); }
+  const col = def.color;
+  x.fillStyle = col; x.strokeStyle = col;
+  if (kind === "bolt") {
+    x.beginPath(); x.moveTo(cx, 18); x.lineTo(cx + 13, 74); x.lineTo(cx - 13, 74); x.closePath();
+    x.fillStyle = "#46538a"; x.fill(); x.drawImage(orb(col, 11), cx - 13, 8);
+  } else if (kind === "mortar") {
+    x.fillStyle = "#5a3b33"; x.beginPath(); x.arc(cx, 74, 24, Math.PI, 0); x.fill();
+    x.save(); x.translate(cx, 62); x.rotate(-0.6); x.fillStyle = "#2c3247"; x.fillRect(-6, -34, 13, 36); x.restore();
+    x.drawImage(orb(col, 9), cx - 11, 22);
+  } else if (kind === "frost") {
+    x.fillStyle = "#3d5a7a";
+    for (const [dx, h] of [[-16, 34], [0, 52], [16, 38]]) {
+      x.beginPath(); x.moveTo(cx + dx - 8, 78); x.lineTo(cx + dx, 78 - h); x.lineTo(cx + dx + 8, 78); x.closePath(); x.fill();
     }
-    this.bodyCache.set(key, c);
-    return c;
-  },
+    x.drawImage(orb(col, 10), cx - 12, 14);
+  } else if (kind === "storm") {
+    x.fillStyle = "#413a63"; x.fillRect(cx - 6, 30, 12, 48);
+    for (let i = 0; i < 3; i++) { x.strokeStyle = col; x.lineWidth = 3; x.beginPath(); x.arc(cx, 34 + i * 13, 10 + i * 4, 0, 7); x.stroke(); }
+    x.drawImage(orb(col, 8), cx - 10, 12);
+  } else if (kind === "venom") {
+    x.strokeStyle = "#3f7a3a"; x.lineWidth = 5;
+    for (const a of [-0.7, 0, 0.7]) {
+      x.beginPath(); x.moveTo(cx, 80); x.quadraticCurveTo(cx + Math.sin(a) * 22, 55, cx + Math.sin(a) * 30, 34 + Math.abs(a) * 16); x.stroke();
+    }
+    x.drawImage(orb(col, 10), cx - 12, 26);
+  } else if (kind === "lance") {
+    x.fillStyle = "#6b5a2e"; x.beginPath(); x.moveTo(cx, 8); x.lineTo(cx + 7, 78); x.lineTo(cx - 7, 78); x.closePath(); x.fill();
+    x.drawImage(orb(col, 9), cx - 11, 4);
+  }
+  if (level >= 3) { // crown pips
+    x.fillStyle = "#ffe98a";
+    for (const dx of [-22, 0, 22]) { x.beginPath(); x.moveTo(cx + dx, 96); x.lineTo(cx + dx + 5, 106); x.lineTo(cx + dx - 5, 106); x.closePath(); x.fill(); }
+  }
+  if (ascended) { // halo
+    x.strokeStyle = "#ffe98acc"; x.lineWidth = 3;
+    x.beginPath(); x.ellipse(cx, 20, 26, 8, 0, 0, 7); x.stroke();
+  }
+  return c;
+}
 
-  paintWings(g, cx, cy, r, def, frame) {
-    const lift = frame === 0 ? r * 0.34 : r * 0.05;   // wing-beat offset
-    g.fillStyle = def.dark;
-    g.globalAlpha = 0.85;
-    for (const side of [-1, 1]) {
-      g.save();
-      g.translate(cx + side * r * 0.55, cy - r * 0.1);
-      g.rotate(side * (0.5 + (frame === 0 ? -0.22 : 0.16)));
-      g.beginPath();
-      g.ellipse(side * r * 0.72, -lift * 0.4, r * 0.95, r * 0.5, 0, 0, Math.PI * 2);
-      g.fill();
-      g.restore();
-    }
-    g.globalAlpha = 1;
-  },
+function enemySprite(kind, def) {
+  const R = def.r, S = (R + 10) * 2, c = cnv(S, S), x = c.getContext("2d"), cx = S / 2;
+  x.fillStyle = def.color;
+  x.beginPath(); x.arc(cx, cx, R, 0, 7); x.fill();
+  const g = x.createRadialGradient(cx - R * 0.3, cx - R * 0.35, 2, cx, cx, R);
+  g.addColorStop(0, "rgba(255,255,255,0.5)"); g.addColorStop(1, "rgba(0,0,0,0.28)");
+  x.fillStyle = g; x.beginPath(); x.arc(cx, cx, R, 0, 7); x.fill();
+  x.fillStyle = "#131828";
+  const eo = R * 0.36, er = Math.max(2, R * 0.16);
+  x.beginPath(); x.arc(cx - eo, cx - R * 0.12, er, 0, 7); x.arc(cx + eo, cx - R * 0.12, er, 0, 7); x.fill();
+  if (kind === "bulwark") {
+    x.fillStyle = "#d7e4f7"; x.fillRect(cx - R - 3, cx - R * 0.55, 9, R * 1.1);
+    x.fillStyle = "#8ea6c9"; x.fillRect(cx - R - 3, cx - 3, 9, 5);
+  } else if (kind === "mender") {
+    x.fillStyle = "#eafff1"; const s = R * 0.16;
+    x.fillRect(cx - s, cx - R * 0.62, s * 2, R * 0.5); x.fillRect(cx - R * 0.31, cx - s * 1.6, R * 0.62, s * 2);
+  } else if (kind === "splitter") {
+    x.strokeStyle = "#ffd7f2"; x.lineWidth = 2.5;
+    x.beginPath(); x.moveTo(cx, cx - R); x.lineTo(cx, cx + R); x.stroke();
+  } else if (kind === "wraith") {
+    x.fillStyle = "rgba(230,255,255,0.75)";
+    x.beginPath(); x.moveTo(cx - R * 0.6, cx + R); x.lineTo(cx - R * 0.2, cx + R * 0.45); x.lineTo(cx + R * 0.2, cx + R); x.lineTo(cx + R * 0.6, cx + R * 0.45); x.lineTo(cx + R * 0.9, cx + R); x.lineTo(cx, cx - R * 1.05); x.closePath(); x.fill();
+  } else if (kind === "titan") {
+    x.fillStyle = "#2b0f18";
+    for (const s of [-1, 1]) { x.beginPath(); x.moveTo(cx + s * R * 0.55, cx - R * 0.6); x.lineTo(cx + s * R * 1.15, cx - R * 1.25); x.lineTo(cx + s * R * 0.95, cx - R * 0.25); x.closePath(); x.fill(); }
+    x.drawImage(orb("#ff5d7a", 11), cx - 13, cx - 13);
+    x.strokeStyle = "#ffb3c2"; x.lineWidth = 3; x.beginPath(); x.arc(cx, cx, R - 3, 0, 7); x.stroke();
+  } else if (kind === "runner") {
+    x.strokeStyle = "#fff3b0"; x.lineWidth = 3;
+    x.beginPath(); x.moveTo(cx - R, cx + R * 0.5); x.lineTo(cx - R * 1.5, cx + R * 0.2); x.stroke();
+  }
+  return c;
+}
 
-  paintBody(g, cx, cy, r, def, type) {
-    g.fillStyle = def.color;
-    g.beginPath();
-    g.ellipse(cx, cy, r * 0.74, r * 0.98, 0, 0, Math.PI * 2);
-    g.fill();
-    g.fillStyle = def.dark;
-    g.beginPath();
-    g.ellipse(cx, cy + r * 0.34, r * 0.5, r * 0.6, 0, 0, Math.PI * 2);
-    g.fill();
-    if (type === "beetle") {
-      g.strokeStyle = "#ffd9a0"; g.lineWidth = 2;
-      g.beginPath(); g.moveTo(cx, cy - r * 0.9); g.lineTo(cx, cy + r * 0.85); g.stroke();
-      g.strokeStyle = def.dark;
-      for (const s of [-1, 1]) for (let i = 0; i < 3; i++) {
-        const ly = cy - r * 0.5 + i * r * 0.5;
-        g.beginPath(); g.moveTo(cx + s * r * 0.6, ly); g.lineTo(cx + s * r * 1.05, ly + r * 0.22); g.stroke();
-      }
-    } else if (type === "spitter") {
-      g.fillStyle = "#d1fae5";
-      g.beginPath(); g.arc(cx, cy - r * 0.62, r * 0.3, 0, Math.PI * 2); g.fill();
-      g.fillStyle = def.dark;
-      g.beginPath(); g.arc(cx, cy - r * 0.62, r * 0.15, 0, Math.PI * 2); g.fill();
-    } else if (type === "splitter") {
-      g.fillStyle = def.color;
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * Math.PI * 2;
-        g.beginPath();
-        g.arc(cx + Math.cos(a) * r * 0.72, cy + Math.sin(a) * r * 0.72, r * 0.34, 0, Math.PI * 2);
-        g.fill();
-      }
-    } else if (type === "dart") {
-      g.fillStyle = def.color;
-      g.beginPath();
-      g.moveTo(cx, cy - r * 1.35); g.lineTo(cx + r * 0.55, cy + r * 0.7); g.lineTo(cx - r * 0.55, cy + r * 0.7);
-      g.closePath(); g.fill();
-    }
-    // Eyes: two lit dots near the head, every creature reads at a glance.
-    g.fillStyle = "#fff7d6";
-    g.beginPath(); g.arc(cx - r * 0.28, cy - r * 0.42, r * 0.13, 0, Math.PI * 2); g.fill();
-    g.beginPath(); g.arc(cx + r * 0.28, cy - r * 0.42, r * 0.13, 0, Math.PI * 2); g.fill();
-  },
+function tileSprite(kind, seed) {
+  const S = AK.CFG.TILE, c = cnv(S, S), x = c.getContext("2d");
+  let rnd = seed * 7919 + 13;
+  const next = () => { rnd = (rnd * 48271) % 2147483647; return rnd / 2147483647; };
+  if (kind === "path") {
+    x.fillStyle = "#49536f"; x.fillRect(0, 0, S, S);
+    x.fillStyle = "#556186"; x.fillRect(3, 3, S - 6, S - 6);
+    x.strokeStyle = "rgba(170,205,255,0.38)"; x.lineWidth = 2; x.strokeRect(4, 4, S - 8, S - 8);
+    x.fillStyle = "rgba(180,215,255,0.65)";
+    x.beginPath(); x.arc(S / 2, S / 2, 3.4, 0, 7); x.fill();
+  } else if (kind === "pond") {
+    x.fillStyle = "#1d3a5f"; x.fillRect(0, 0, S, S);
+    x.fillStyle = "#26507f"; x.beginPath(); x.ellipse(S / 2, S / 2, 24, 17, 0.4, 0, 7); x.fill();
+    x.strokeStyle = "rgba(160,220,255,0.5)"; x.beginPath(); x.ellipse(S / 2, S / 2, 15, 9, 0.4, 0, 7); x.stroke();
+  } else if (kind === "rubble") {
+    x.fillStyle = "#232c47"; x.fillRect(0, 0, S, S);
+    x.fillStyle = "#39466b";
+    for (let i = 0; i < 5; i++) { const px = 8 + next() * 42, py = 8 + next() * 42; x.fillRect(px, py, 6 + next() * 9, 5 + next() * 7); }
+  } else { // grass / vale floor
+    x.fillStyle = "#16233d"; x.fillRect(0, 0, S, S);
+    x.fillStyle = "#1b2c4c";
+    for (let i = 0; i < 7; i++) x.fillRect(next() * S, next() * S, 3, 3);
+    x.fillStyle = "rgba(96,180,220,0.13)";
+    for (let i = 0; i < 3; i++) { const px = next() * S, py = next() * S; x.beginPath(); x.arc(px, py, 5 + next() * 6, 0, 7); x.fill(); }
+    x.strokeStyle = "rgba(120,220,160,0.30)"; x.lineWidth = 1.4;
+    for (let i = 0; i < 3; i++) { const px = 8 + next() * 46, py = 44 + next() * 14; x.beginPath(); x.moveTo(px, py); x.lineTo(px + 3, py - 8); x.stroke(); }
+  }
+  return c;
+}
 
-  // The Hollow Queen: three wing pairs, a petal crown, burning eyes.
-  // Painted at 260px; enrage tints the crown red in phase 3.
-  bossBody(frame, enraged) {
-    const key = "boss|" + frame + "|" + (enraged ? "e" : "p");
-    let img = this.bodyCache.get(key);
-    if (img) return img;
-    const S = 260, c = makeCanvas(S, S), g = c.getContext("2d");
-    const cx = S / 2, cy = S / 2, r = BOSS_DEF.radius;
-    g.fillStyle = BOSS_DEF.dark;
-    g.globalAlpha = 0.9;
-    for (let pair = 0; pair < 3; pair++) {
-      const wr = r * (1.5 - pair * 0.28), wy = cy - r * 0.5 + pair * r * 0.55;
-      const flap = frame === 0 ? -0.14 : 0.12;
-      for (const side of [-1, 1]) {
-        g.save();
-        g.translate(cx + side * r * 0.4, wy);
-        g.rotate(side * (0.65 + flap - pair * 0.12));
-        g.beginPath(); g.ellipse(side * wr * 0.55, 0, wr * 0.62, wr * 0.3, 0, 0, Math.PI * 2); g.fill();
-        g.restore();
-      }
-    }
-    g.globalAlpha = 1;
-    g.fillStyle = BOSS_DEF.color;
-    g.beginPath(); g.ellipse(cx, cy, r * 0.78, r * 1.02, 0, 0, Math.PI * 2); g.fill();
-    g.fillStyle = "rgba(255,255,255,0.4)";
-    g.beginPath(); g.ellipse(cx, cy - r * 0.12, r * 0.34, r * 0.42, 0, 0, Math.PI * 2); g.fill();
-    g.fillStyle = BOSS_DEF.dark;
-    g.beginPath(); g.ellipse(cx, cy + r * 0.44, r * 0.4, r * 0.48, 0, 0, Math.PI * 2); g.fill();
-    const crown = enraged ? "#f87171" : "#facc15";
-    g.fillStyle = crown;
-    for (let i = -2; i <= 2; i++) {
-      const px = cx + i * r * 0.34, py = cy - r * 1.08 - Math.abs(i) * -r * 0.06;
-      g.save(); g.translate(px, py); g.rotate(i * 0.3);
-      g.beginPath(); g.ellipse(0, 0, r * 0.16, r * 0.3, 0, 0, Math.PI * 2); g.fill();
-      g.restore();
-    }
-    g.fillStyle = enraged ? "#fecaca" : "#fff7d6";
-    g.beginPath(); g.arc(cx - r * 0.3, cy - r * 0.4, r * 0.15, 0, Math.PI * 2); g.fill();
-    g.beginPath(); g.arc(cx + r * 0.3, cy - r * 0.4, r * 0.15, 0, Math.PI * 2); g.fill();
-    this.bodyCache.set(key, c);
-    return c;
-  },
+function crystalSprite() {
+  const S = 128, c = cnv(S, S), x = c.getContext("2d"), cx = S / 2;
+  x.drawImage(glowDisc("#57b6ff", 60), 4, 4);
+  const g = x.createLinearGradient(cx, 8, cx, 116);
+  g.addColorStop(0, "#cfeeff"); g.addColorStop(0.5, "#57b6ff"); g.addColorStop(1, "#2050c8");
+  x.fillStyle = g;
+  x.beginPath(); x.moveTo(cx, 6); x.lineTo(cx + 22, 52); x.lineTo(cx + 13, 116); x.lineTo(cx - 13, 116); x.lineTo(cx - 22, 52); x.closePath(); x.fill();
+  x.fillStyle = "rgba(255,255,255,0.55)";
+  x.beginPath(); x.moveTo(cx, 6); x.lineTo(cx + 8, 52); x.lineTo(cx, 96); x.lineTo(cx - 8, 52); x.closePath(); x.fill();
+  x.fillStyle = "#31456f"; x.fillRect(cx - 30, 112, 60, 10);
+  return c;
+}
 
-  paintHeart(lit) {
-    const S = 30, c = makeCanvas(S, S), g = c.getContext("2d");
-    g.translate(S / 2, S / 2);
-    g.fillStyle = lit ? "#fbbf24" : "rgba(120,110,150,0.5)";
-    g.beginPath();
-    g.moveTo(0, 9);
-    g.bezierCurveTo(-11, 0, -8, -9, -3.5, -9);
-    g.bezierCurveTo(-1, -9, 0, -7.5, 0, -5.5);
-    g.bezierCurveTo(0, -7.5, 1, -9, 3.5, -9);
-    g.bezierCurveTo(8, -9, 11, 0, 0, 9);
-    g.fill();
-    if (lit) {
-      g.fillStyle = "#fff7d6";
-      g.beginPath(); g.arc(0, -2, 2.4, 0, Math.PI * 2); g.fill();
-    }
-    return c;
-  },
-
-  paintShard() {
-    const S = 26, c = makeCanvas(S, S), g = c.getContext("2d");
-    g.translate(S / 2, S / 2);
-    g.fillStyle = "#fef08a";
-    g.beginPath();
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
-      const rr = i % 2 === 0 ? 10 : 4.2;
-      const x = Math.cos(a) * rr, y = Math.sin(a) * rr;
-      if (i === 0) g.moveTo(x, y); else g.lineTo(x, y);
-    }
-    g.closePath(); g.fill();
-    g.fillStyle = "#ffffff";
-    g.beginPath(); g.arc(0, 0, 2.6, 0, Math.PI * 2); g.fill();
-    return c;
-  },
+AK.buildSprites = function () {
+  const spr = { tower: {}, enemy: {}, glow: {}, orb: {}, tile: { grass: [], path: null, pond: null, rubble: null } };
+  for (const [kind, def] of Object.entries(AK.TOWERS)) {
+    spr.tower[kind] = [1, 2, 3].map((lv) => towerSprite(kind, def, lv, false));
+    spr.tower[kind].push(towerSprite(kind, def, 3, true)); // index 3 = ascended
+    spr.glow[kind] = glowDisc(def.color, 44);
+    spr.orb[kind] = orb(def.color, 6);
+  }
+  for (const [kind, def] of Object.entries(AK.ENEMIES)) spr.enemy[kind] = enemySprite(kind, def);
+  for (let i = 0; i < 4; i++) spr.tile.grass.push(tileSprite("grass", i + 1));
+  spr.tile.path = tileSprite("path", 3); spr.tile.pond = tileSprite("pond", 5); spr.tile.rubble = tileSprite("rubble", 7);
+  spr.crystal = crystalSprite();
+  spr.glowWhite = glowDisc("#cfe4ff", 40);
+  AK.SPR = spr;
 };

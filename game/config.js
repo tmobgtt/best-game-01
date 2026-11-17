@@ -1,168 +1,115 @@
-// config.js — every balance number, enemy definition, upgrade and blessing
-// for MOTHLIGHT: The Hollow Queen lives in this one file, so the game's
-// tuning can be read (and rebalanced) without touching any system code.
+// config.js — every balance table and the board layout live here, so the
+// rest of the code is logic only. AETHERKEEP: defend the Aether Crystal at
+// the end of the rune road through 20 waves.
+"use strict";
 
-const CFG = {
-  width: 1280,
-  height: 800,
-  playerRadius: 14,
-  playerSpeed: 268,
-  playerFireRate: 5.5,        // sparks per second before upgrades
-  playerDamage: 1,
-  bulletSpeed: 640,
-  bulletLife: 0.9,            // seconds before a spark fades
-  dashTime: 0.16,             // seconds of dash
-  dashSpeed: 980,
-  dashCooldown: 1.5,
-  hurtInvulnTime: 1.25,       // mercy invulnerability after losing a heart
-  startHearts: 3,
-  heartEveryWaves: 0,         // hearts come from drafts and drops, not a timer
-  comboWindow: 2.6,           // seconds to keep a kill chain alive
-  comboPerStep: 6,            // kills per multiplier step
-  comboMax: 8,
-  shardChance: 0.34,          // chance a kill drops a star shard
-  blessingTime: 12,           // seconds a picked blessing lasts
-  bossEvery: 5,               // a boss guards every fifth wave
-  intermissionTime: 2.2,      // banner pause before a wave pours in
-  eliteChanceBase: 0.07,      // from wave 4, scaled gently by wave
-  spawnEdgeMargin: 36,
+AK.CFG = {
+  W: 1280, H: 800,
+  TILE: 64, COLS: 13, ROWS: 11,
+  MAP_X: 14, MAP_Y: 66,           // pixel origin of the grid
+  HEAD_H: 54,                     // header bar height
+  SIDE_X: 862,                    // sidebar left edge
+  START_GOLD: 230,
+  START_LIVES: 20,
+  MAX_WAVE: 20,
+  SELL_RATE: 0.7,                 // refund fraction of gold invested
+  INTEREST: 0.05, INTEREST_CAP: 40,
+  EARLY_BONUS_PER_SEC: 2,         // gold per second of intermission skipped
+  LEAK_FLASH: 0.55,
 };
 
-// Enemy definitions. cost is the wave-budget price; score is the base value
-// before the combo multiplier; unlock is the first wave the type may appear.
-const ENEMY_TYPES = {
-  mini: {
-    name: "Glooming", radius: 9, hp: 1, speed: 148, cost: 1, score: 25,
-    unlock: 1, color: "#8f7bd8", dark: "#4b3a7a",
+// The rune road, in tile coordinates. Enemies enter at the left of row 2,
+// serpentine down the vale, and strike the crystal gate at the right of
+// row 10. The crystal itself stands on tile (12, 10).
+AK.PATH_TILES = [
+  [-1, 2], [10, 2], [10, 5], [2, 5], [2, 8], [11, 8], [11, 10], [14, 10],
+];
+// Tiles nobody may build on: ponds and rubble off the road.
+AK.BLOCKED = { "5,0": "pond", "6,0": "pond", "12,0": "rubble", "0,7": "pond", "6,10": "rubble", "12,4": "pond" };
+AK.CRYSTAL_TILE = [12, 10];
+
+// Tower kinds. dmg/rate/range are level 1; growth applies per level.
+// ascend: the final form a level-3 tower can wake into.
+AK.TOWERS = {
+  bolt: {
+    name: "Bolt Spire", key: "1", cost: 50, range: 152, dmg: 9, rate: 3.4,
+    projSpeed: 560, color: "#ffd75e", desc: "Fast bolts, honest work.",
+    growth: { dmg: 1.75, range: 10, rate: 1.12 },
+    ascend: { name: "TEMPEST CROWN", cost: 150, note: "Strikes 3 targets at once." },
   },
-  moth: {
-    name: "Shadow Moth", radius: 14, hp: 3, speed: 104, cost: 2, score: 50,
-    unlock: 1, color: "#a78bfa", dark: "#5b439e",
+  mortar: {
+    name: "Ember Mortar", key: "2", cost: 80, range: 196, dmg: 27, rate: 0.55,
+    projSpeed: 330, splash: 58, color: "#ff8a4d", desc: "Lobbed shells, wide splash.",
+    growth: { dmg: 1.8, range: 12, rate: 1.08 },
+    ascend: { name: "SUNFALL", cost: 220, note: "Huge splash; shells leave burning ground." },
   },
-  dart: {
-    name: "Thorn Dart", radius: 11, hp: 2, speed: 92, cost: 3, score: 80,
-    unlock: 2, color: "#f472b6", dark: "#9d2f66",
+  frost: {
+    name: "Frost Obelisk", key: "3", cost: 60, range: 134, dmg: 4, rate: 2.1,
+    projSpeed: 430, slowPct: 0.45, slowDur: 1.6, color: "#7fe3ff", desc: "Chills everything it touches.",
+    growth: { dmg: 1.7, range: 10, rate: 1.1 },
+    ascend: { name: "ABSOLUTE ZERO", cost: 170, note: "Deeper chill, a chance to freeze solid, slowing aura." },
   },
-  spitter: {
-    name: "Gloom Spitter", radius: 15, hp: 4, speed: 62, cost: 4, score: 100,
-    unlock: 3, color: "#34d399", dark: "#166b4d",
+  storm: {
+    name: "Storm Pylon", key: "4", cost: 100, range: 164, dmg: 15, rate: 1.05,
+    projSpeed: 0, chain: 3, color: "#b78cff", desc: "Lightning that leaps between foes.",
+    growth: { dmg: 1.75, range: 10, rate: 1.1 },
+    ascend: { name: "JUDGEMENT ARC", cost: 240, note: "Chains to 6 foes, barely weaker per leap." },
   },
-  beetle: {
-    name: "Ember Beetle", radius: 19, hp: 14, speed: 46, cost: 6, score: 150,
-    unlock: 3, color: "#fb923c", dark: "#8a3c12",
+  venom: {
+    name: "Venom Thorn", key: "5", cost: 55, range: 138, dmg: 3, rate: 1.7,
+    projSpeed: 460, poison: 7, poisonDur: 3, color: "#8dff6e", desc: "Weak sting, cruel poison.",
+    growth: { dmg: 1.6, range: 10, rate: 1.1 },
+    ascend: { name: "PLAGUE HEART", cost: 160, note: "Poison stacks higher and spreads on death." },
   },
-  splitter: {
-    name: "Puffball Husk", radius: 16, hp: 6, speed: 70, cost: 5, score: 110,
-    unlock: 4, color: "#facc15", dark: "#8a6d0d",
-  },
-  weaver: {
-    name: "Night Weaver", radius: 13, hp: 5, speed: 118, cost: 4, score: 120,
-    unlock: 6, color: "#38bdf8", dark: "#155e80",
+  lance: {
+    name: "Sun Lance", key: "6", cost: 120, range: 268, dmg: 58, rate: 0.5,
+    projSpeed: 900, critC: 0.2, critM: 2, color: "#fff3a0", desc: "A slow spear of dawn. Crits.",
+    growth: { dmg: 1.85, range: 14, rate: 1.06 },
+    ascend: { name: "DAWN SPEAR", cost: 260, note: "Crits often and threefold." },
   },
 };
+AK.TOWER_ORDER = ["bolt", "mortar", "frost", "storm", "venom", "lance"];
+// cost to go from level n to n+1, as a multiple of base cost; ascend separate.
+AK.UPGRADE_MULT = { 1: 0.8, 2: 1.25 };
 
-// The Hollow Queen. hp is computed per boss wave in waves.js.
-const BOSS_DEF = {
-  name: "THE HOLLOW QUEEN",
-  radius: 46,
-  baseHp: 120,
-  hpPerWave: 21,              // wave 5 -> 225, wave 10 -> 330, wave 15 -> 435
-  speed: 58,
-  score: 1500,
-  color: "#e9d5ff",
-  dark: "#7e22ce",
+// Enemy kinds. armor is flat reduction per hit (min 1 damage through).
+AK.ENEMIES = {
+  mite:    { name: "Mite",     hp: 16,  speed: 47, bounty: 4,  leak: 1, r: 11, armor: 0, color: "#c9a2ff" },
+  grunt:   { name: "Grunt",    hp: 44,  speed: 34, bounty: 6,  leak: 1, r: 14, armor: 0, color: "#ff9d6e" },
+  runner:  { name: "Runner",   hp: 24,  speed: 82, bounty: 6,  leak: 1, r: 11, armor: 0, color: "#ffe066" },
+  bulwark: { name: "Bulwark",  hp: 150, speed: 26, bounty: 11, leak: 2, r: 17, armor: 4, color: "#9fb4d8" },
+  mender:  { name: "Mender",   hp: 60,  speed: 32, bounty: 13, leak: 1, r: 14, armor: 0, color: "#7dffb0", heal: 9, healRange: 96 },
+  splitter:{ name: "Splitter", hp: 70,  speed: 36, bounty: 8,  leak: 1, r: 15, armor: 0, color: "#ff7dd1", splits: 2 },
+  wraith:  { name: "Wraith",   hp: 52,  speed: 54, bounty: 12, leak: 1, r: 13, armor: 0, color: "#aef4ff", evade: 0.28 },
+  titan:   { name: "Hollow Titan", hp: 2600, speed: 15, bounty: 160, leak: 10, r: 30, armor: 2, color: "#ff5d7a", boss: true },
 };
 
-// Timed blessings granted by star shards, granted in rotation so a player
-// who keeps diving for shards cycles through all four.
-const BLESSINGS = [
-  { id: "spread", name: "SPREAD", color: "#facc15", desc: "+2 fan sparks" },
-  { id: "rapid", name: "RAPID", color: "#fb923c", desc: "+65% fire rate" },
-  { id: "aegis", name: "AEGIS", color: "#38bdf8", desc: "a shield that eats one hit" },
-  { id: "blaze", name: "BLAZE", color: "#f87171", desc: "sparks ignite what they touch" },
+// Wave compositions: [kind, count, gapSeconds]. HP scales per wave in waves.js.
+AK.WAVES = [
+  [["mite", 8, 0.9]],
+  [["mite", 10, 0.8], ["grunt", 3, 1.2]],
+  [["grunt", 8, 0.9], ["mite", 6, 0.6]],
+  [["runner", 8, 0.55], ["grunt", 5, 1.0]],
+  [["grunt", 8, 0.8], ["titan", 1, 1.0], ["mite", 8, 0.7]],
+  [["splitter", 7, 0.9], ["runner", 6, 0.5]],
+  [["mender", 3, 1.4], ["grunt", 10, 0.7], ["mite", 8, 0.6]],
+  [["bulwark", 6, 1.1], ["runner", 8, 0.5]],
+  [["wraith", 9, 0.8], ["splitter", 5, 0.9]],
+  [["bulwark", 5, 1.2], ["titan", 1, 1.0], ["wraith", 6, 0.8]],
+  [["runner", 16, 0.38], ["mender", 2, 1.6]],
+  [["splitter", 10, 0.7], ["bulwark", 5, 1.1]],
+  [["wraith", 12, 0.65], ["grunt", 10, 0.6]],
+  [["mender", 4, 1.2], ["bulwark", 7, 1.0], ["runner", 8, 0.45]],
+  [["titan", 1, 1.0], ["splitter", 8, 0.8], ["wraith", 6, 0.7]],
+  [["runner", 20, 0.3], ["wraith", 8, 0.6]],
+  [["bulwark", 10, 0.9], ["mender", 3, 1.3]],
+  [["splitter", 14, 0.55], ["wraith", 10, 0.55]],
+  [["grunt", 18, 0.45], ["bulwark", 8, 0.9], ["mender", 3, 1.2]],
+  [["titan", 1, 1.0], ["wraith", 10, 0.6], ["runner", 14, 0.35], ["bulwark", 6, 1.0]],
 ];
+AK.HP_GROWTH = 0.16; // +16% enemy hp per wave after the first
 
-// The between-wave draft pool. apply() lives in upgrades.js; this table is
-// pure data: what the card says, how many stacks may be taken, and the
-// weight the roll gives it.
-const UPGRADE_POOL = [
-  { id: "twin",    name: "Twin Sparks",   icon: "twin",    max: 4, weight: 10,
-    desc: "+1 spark per volley, fanned wide." },
-  { id: "rapid",   name: "Rapid Lantern", icon: "rapid",   max: 4, weight: 10,
-    desc: "+22% fire rate." },
-  { id: "bright",  name: "Bright Sparks", icon: "bright",  max: 4, weight: 10,
-    desc: "+1 spark damage." },
-  { id: "pierce",  name: "Piercing Light", icon: "pierce", max: 3, weight: 7,
-    desc: "Sparks pass through +1 enemy." },
-  { id: "bounce",  name: "Ricochet",      icon: "bounce",  max: 2, weight: 6,
-    desc: "A spent spark leaps to the nearest foe." },
-  { id: "ember",   name: "Ember Rounds",  icon: "ember",   max: 2, weight: 7,
-    desc: "Hits set enemies burning." },
-  { id: "frost",   name: "Frost Rounds",  icon: "frost",   max: 2, weight: 7,
-    desc: "Hits chill enemies, slowing them." },
-  { id: "swift",   name: "Swift Wick",    icon: "swift",   max: 3, weight: 8,
-    desc: "+11% keeper speed." },
-  { id: "longdash", name: "Long Dash",    icon: "dash",    max: 3, weight: 8,
-    desc: "Dash recharges 25% faster, reaches further." },
-  { id: "magnet",  name: "Magnet Bloom",  icon: "magnet",  max: 3, weight: 8,
-    desc: "+70% shard pull radius." },
-  { id: "heart",   name: "Heart of the Garden", icon: "heart", max: 3, weight: 6,
-    desc: "+1 max heart, and mend one now." },
-  { id: "aegis",   name: "Aegis Ring",    icon: "aegis",   max: 2, weight: 6,
-    desc: "A shield that eats one hit, regrown each wave." },
-  { id: "orbit",   name: "Orbit Wisp",    icon: "orbit",   max: 2, weight: 6,
-    desc: "A guardian spark circles you, burning foes." },
-  { id: "charm",   name: "Combo Charm",   icon: "charm",   max: 2, weight: 7,
-    desc: "Combo chains last 60% longer." },
-];
-
-// Named wave events. The director picks at most one per non-boss wave from
-// wave 3 on; the banner announces it so the player can brace.
-const WAVE_EVENTS = [
-  { id: "surge", name: "MOTH SURGE", only: "mini", note: "a swarm pours in" },
-  { id: "emberfall", name: "EMBERFALL", only: "beetle", note: "armor on the march" },
-  { id: "dartstorm", name: "DART STORM", only: "dart", note: "they lunge together" },
-];
-
-// THE LIGHT LADDER — the game's headline mechanic. The lantern does not
-// stay what it was: at each named wave it visibly grows. The pool of
-// light widens every single wave; at wave 3 it learns to pulse, at wave 4
-// creatures standing in it are light-struck and take bonus damage, at
-// wave 5 a second flame joins it, and the pulses keep quickening.
-// lightStageFor(wave) resolves the current rung.
-const LIGHT_STAGES = [
-  { wave: 1, name: "KINDLED", note: "a bare flame against the dark", pulse: 0, pulseDmg: 0, struck: false, twin: false },
-  { wave: 2, name: "EMBER VEIL", note: "the light widens, the dark thins", pulse: 0, pulseDmg: 0, struck: false, twin: false },
-  { wave: 3, name: "DAWNBREAK RING", note: "the lantern learns to pulse", pulse: 6, pulseDmg: 1, struck: false, twin: false },
-  { wave: 4, name: "PRISM HEART", note: "foes in the light are light-struck", pulse: 6, pulseDmg: 1, struck: true, twin: false },
-  { wave: 5, name: "TWIN FLAME", note: "a second flame keeps the vigil", pulse: 5.4, pulseDmg: 1, struck: true, twin: true },
-  { wave: 7, name: "REFRACTION", note: "the pulses bite deeper", pulse: 5, pulseDmg: 2, struck: true, twin: true },
-  { wave: 9, name: "CORONA", note: "a small sun, and still growing", pulse: 4.2, pulseDmg: 2, struck: true, twin: true },
-];
-
-function lightStageFor(wave) {
-  let stage = LIGHT_STAGES[0];
-  for (const s of LIGHT_STAGES) if (wave >= s.wave) stage = s;
-  return stage;
-}
-
-// FINAL FORMS — every draft blessing, maxed out, wakes into a stronger
-// named shape. The card shows the form before you commit to it, the
-// game-over screen gilds the ones you woke, and player.js implements
-// each effect from the stack counts.
-const FINAL_FORMS = {
-  twin:     { name: "CONSTELLATION", desc: "+1 spark, and sparks bend toward foes." },
-  rapid:    { name: "SUNCORE ENGINE", desc: "every 4th volley burns twice as bright." },
-  bright:   { name: "WHITE FLAME", desc: "kills burst in a ring of fire." },
-  pierce:   { name: "THE LONG DAWN", desc: "sparks pierce +1 more enemy." },
-  bounce:   { name: "ECHO LANTERN", desc: "sparks ricochet +1 more time." },
-  ember:    { name: "WILDFIRE HEART", desc: "burns bite twice as fast." },
-  frost:    { name: "FIRST SNOW", desc: "chills bite deeper and last longer." },
-  swift:    { name: "GALELIGHT", desc: "faster still, and the dash returns sooner." },
-  longdash: { name: "COMET'S TAIL", desc: "the dash sears what it crosses." },
-  magnet:   { name: "EVENTIDE PULL", desc: "shards answer from anywhere in the dark." },
-  heart:    { name: "EVERGREEN", desc: "each new wave mends one heart." },
-  aegis:    { name: "HALO OF DAWN", desc: "the shield regrows, even mid-wave." },
-  orbit:    { name: "BINARY SUNS", desc: "a third guardian joins the circle." },
-  charm:    { name: "PERFECT CHAIN", desc: "the combo can climb to x10." },
+AK.ABILITIES = {
+  meteor:   { name: "Meteor", key: "Q", cd: 40, dmg: 330, radius: 96, color: "#ffb04d", desc: "Call down a burning rock. Click to aim, then click the field." },
+  blizzard: { name: "Blizzard", key: "W", cd: 55, freeze: 2.6, color: "#9fe8ff", desc: "Freeze every foe on the road solid." },
 };

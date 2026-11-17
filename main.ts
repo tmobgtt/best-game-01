@@ -1,4 +1,4 @@
-// Mothlight — The Lantern Grows: the hand-in program.
+// Aetherkeep — Tower Defense of the Last Crystal: the hand-in program.
 //
 // It copies the playable game and its screenshots into the output
 // directory and writes dossier.json with the kit's buildDossier, then
@@ -32,12 +32,12 @@ writeFileSync(join(outputDir, "dossier.json"), dossier);
 
 const rebuilt = buildDossier(outputDir, caps);
 if (!Buffer.from(rebuilt).equals(Buffer.from(dossier))) {
-  throw new Error("mothlight: dossier rebuild mismatch — refusing to hand in");
+  throw new Error("aetherkeep: dossier rebuild mismatch — refusing to hand in");
 }
 
 const gameFiles = readdirSync(join(outputDir, "game"), { recursive: true }).length;
 const shotFiles = readdirSync(join(outputDir, "screenshots")).length;
 console.log(
-  `mothlight: dossier written (${dossier.byteLength} bytes, verified) to ${outputDir} ` +
+  `aetherkeep: dossier written (${dossier.byteLength} bytes, verified) to ${outputDir} ` +
   `with ${gameFiles} game files and ${shotFiles} screenshots`,
 );

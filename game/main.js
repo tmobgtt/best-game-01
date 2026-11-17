@@ -1,755 +1,361 @@
-// main.js — the orchestrator. It owns the canvas, the state machine
-// (title, playing, draft, paused, dying, gameover), the garden backdrop,
-// collisions, combo and score, pickups, and the juice budget: hit-stop,
-// slow motion and screen shake are all spent here, where every system
-// can ask for them. Everything else lives in its own file.
+// main.js — AETHERKEEP's state machine and glue: boot, the frame loop,
+// economy actions (build / upgrade / ascend / sell), click and key routing,
+// leaks and endings, and the __AK hooks the play-test stages screenshots
+// through (the game's own state, never a mock-up).
+"use strict";
 
-const Pickups = {
-  pool: new Pool(90, () => ({ kind: "shard", x: 0, y: 0, vx: 0, vy: 0, t: 0, life: 0 })),
-  drop(kind, x, y) {
-    const p = this.pool.obtain();
-    if (!p) return;
-    p.kind = kind; p.x = x; p.y = y;
-    const a = rand(0, Math.PI * 2), sp = rand(30, 120);
-    p.vx = Math.cos(a) * sp; p.vy = Math.sin(a) * sp;
-    p.t = rand(0, 6); p.life = 14;
-  },
-  update(dt, game) {
-    const player = game.player;
-    this.pool.forEachAlive((p) => {
-      p.t += dt; p.life -= dt;
-      if (p.life <= 0) { p.alive = false; return; }
-      p.vx *= Math.max(0, 1 - 3 * dt); p.vy *= Math.max(0, 1 - 3 * dt);
-      const d2 = dist2(p.x, p.y, player.x, player.y);
-      const magnetR = player.stats.globalMagnet ? 2400 : player.stats.magnetR;
-      if (d2 < magnetR * magnetR) {
-        const d = Math.sqrt(d2) || 1;
-        const pull = 620 * (1 - d / (magnetR * 1.6));
-        p.vx += ((player.x - p.x) / d) * pull * dt * 4;
-        p.vy += ((player.y - p.y) / d) * pull * dt * 4;
-      }
-      p.x += p.vx * dt; p.y += p.vy * dt;
-      if (d2 < 30 * 30 && game.state === "playing") {
-        p.alive = false;
-        game.collectPickup(p);
-      }
-    });
-  },
-  draw(ctx) {
-    this.pool.forEachAlive((p) => {
-      if (p.life < 3 && Math.floor(p.t * 6) % 2) return;   // expiring blink
-      const bobY = Math.sin(p.t * 3.2) * 3;
-      ctx.save();
-      ctx.globalCompositeOperation = "lighter";
-      const gs = p.kind === "heart" ? 54 : 44;
-      ctx.drawImage(Sprites.glow(p.kind === "heart" ? "#f87171" : "#facc15"),
-        p.x - gs / 2, p.y + bobY - gs / 2, gs, gs);
-      ctx.restore();
-      if (p.kind === "heart") ctx.drawImage(Sprites.heartLit, p.x - 13, p.y + bobY - 13, 26, 26);
-      else ctx.drawImage(Sprites.shardImg, p.x - 11, p.y + bobY - 11, 22, 22);
-    });
-  },
-  clear() { this.pool.releaseAll(); },
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+AK.buildSprites();
+AK.Map.init();
+AK.Input.init(cv);
+
+const store = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* private mode */ } },
 };
 
-const Game = {
-  canvas: null,
-  ctx: null,
-  state: "title",
-  time: 0,
-  player: new Player(),
-  score: 0,
-  best: 0,
-  newBest: false,
-  kills: 0,
-  combo: 0,
-  comboT: 0,
-  mult: 1,
-  bestMult: 1,
-  runTime: 0,
-  shake: 0,
-  hitStopT: 0,
-  hurtFlash: 0,
-  dyingT: 0,
-  pendingDraftT: 0,
-  lightPulseT: 3,
-  explosionDepth: 0,
-  gardenImg: null,
-  grottoImg: null,
-  arenaIdx: 0,
-  ambient: [],
-  lastHitSfx: 0,
-  lastKillSfx: 0,
-  intensityTarget: 0.15,
-
-  timeString() {
-    const s = Math.floor(this.runTime);
-    return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
-  },
-
-  start() {
-    this.canvas = document.getElementById("game");
-    this.ctx = this.canvas.getContext("2d");
-    try { this.best = parseInt(localStorage.getItem("mothlight-hollow-queen-best") || "0", 10) || 0; }
-    catch (e) { this.best = 0; }
-    Sprites.init();
-    Particles.init();
-    Input.init(this.canvas);
-    this.gardenImg = this.paintGarden(0);
-    this.grottoImg = this.paintGarden(1);
-    for (let i = 0; i < 6; i++) {
-      this.ambient.push({ x: rand(80, CFG.width - 80), y: rand(80, CFG.height - 80), a: rand(0, 6.3), sp: rand(18, 40), seed: rand(0, 9) });
-    }
-    Director.hooks.onStart = (wave, isBoss, event) => this.onWaveStart(wave, isBoss, event);
-    Director.hooks.onClear = (wave) => this.onWaveClear(wave);
-    Director.hooks.onBossArrive = () => {
-      HUD.announce(BOSS_DEF.name, "guardian of the garden's dark", 2.6);
-      this.shake = Math.max(this.shake, 7);
-    };
-    window.addEventListener("blur", () => { if (this.state === "playing") this.state = "paused"; });
-    this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
-    let last = performance.now();
-    const loop = (now) => {
-      const rawDt = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      this.frame(rawDt);
-      requestAnimationFrame(loop);
-    };
-    requestAnimationFrame(loop);
-  },
-
-  // Two arenas, painted once each: the Midnight Garden (indigo, moonlit,
-  // flower field) and the Ember Grotto (smouldering red dark, crystal
-  // shards, a low ember sun). The garden shifts after every Queen.
-  paintGarden(variant) {
-    const grotto = variant === 1;
-    const c = makeCanvas(CFG.width, CFG.height);
-    const g = c.getContext("2d");
-    const grad = g.createLinearGradient(0, 0, 0, CFG.height);
-    if (grotto) {
-      grad.addColorStop(0, "#1d0810");
-      grad.addColorStop(0.55, "#2a0f16");
-      grad.addColorStop(1, "#170b06");
-    } else {
-      grad.addColorStop(0, "#0d0724");
-      grad.addColorStop(0.55, "#151038");
-      grad.addColorStop(1, "#0a2027");
-    }
-    g.fillStyle = grad;
-    g.fillRect(0, 0, CFG.width, CFG.height);
-    // Sky body: the moon, or the grotto's low ember sun.
-    const sx = grotto ? 250 : 1030, sy = grotto ? 128 : 110;
-    const sky = g.createRadialGradient(sx, sy, 8, sx, sy, 340);
-    if (grotto) {
-      sky.addColorStop(0, "rgba(253,186,116,0.32)");
-      sky.addColorStop(0.25, "rgba(248,113,113,0.12)");
-      sky.addColorStop(1, "rgba(248,113,113,0)");
-    } else {
-      sky.addColorStop(0, "rgba(221,214,254,0.34)");
-      sky.addColorStop(0.25, "rgba(167,139,250,0.13)");
-      sky.addColorStop(1, "rgba(167,139,250,0)");
-    }
-    g.fillStyle = sky;
-    g.fillRect(0, 0, CFG.width, CFG.height);
-    g.fillStyle = grotto ? "#fdba74" : "#e9d5ff";
-    g.beginPath(); g.arc(sx, sy, 27, 0, Math.PI * 2); g.fill();
-    g.fillStyle = grotto ? "rgba(69,10,10,0.3)" : "rgba(13,7,36,0.35)";
-    g.beginPath(); g.arc(sx - 12, sy - 8, 23, 0, Math.PI * 2); g.fill();
-    if (grotto) {
-      // Crystal field: lit shards jutting from the floor.
-      const palette = ["#fda4af", "#fdba74", "#facc15", "#5eead4", "#f8fafc"];
-      for (let i = 0; i < 120; i++) {
-        const x = rand(0, CFG.width), y = 200 + Math.pow(Math.random(), 0.6) * (CFG.height - 220);
-        const h = rand(6, 20), w = rand(2.5, 5);
-        g.globalAlpha = rand(0.3, 0.9);
-        g.fillStyle = pick(palette);
-        g.beginPath();
-        g.moveTo(x - w, y); g.lineTo(x, y - h); g.lineTo(x + w, y);
-        g.closePath(); g.fill();
-      }
-      // Ember cracks in the rock floor.
-      g.globalAlpha = 1;
-      g.strokeStyle = "rgba(249,115,22,0.4)";
-      g.lineWidth = 1.6;
-      for (let i = 0; i < 16; i++) {
-        let x = rand(0, CFG.width), y = rand(CFG.height * 0.55, CFG.height - 12);
-        g.beginPath(); g.moveTo(x, y);
-        for (let k = 0; k < 4; k++) { x += rand(-46, 46); y += rand(-8, 14); g.lineTo(x, y); }
-        g.stroke();
-      }
-    } else {
-      // Flower field: hundreds of tiny lit dots, denser toward the floor.
-      const palette = ["#f472b6", "#a78bfa", "#38bdf8", "#facc15", "#34d399", "#f8fafc"];
-      for (let i = 0; i < 300; i++) {
-        const y = 120 + Math.pow(Math.random(), 0.6) * (CFG.height - 140);
-        g.globalAlpha = rand(0.25, 0.85);
-        g.fillStyle = pick(palette);
-        g.beginPath(); g.arc(rand(0, CFG.width), y, rand(0.8, 2.6), 0, Math.PI * 2); g.fill();
-      }
-      g.globalAlpha = 1;
-    }
-    // Floor growth: grass blades, or basalt teeth in the grotto.
-    if (grotto) {
-      g.fillStyle = "#20090a";
-      for (let i = 0; i < 130; i++) {
-        const x = rand(0, CFG.width), h = rand(10, 34), w = rand(4, 9);
-        g.beginPath();
-        g.moveTo(x - w, CFG.height); g.lineTo(x, CFG.height - h); g.lineTo(x + w, CFG.height);
-        g.closePath(); g.fill();
-      }
-    } else {
-      g.strokeStyle = "#0f3d33";
-      g.lineWidth = 2.4;
-      for (let i = 0; i < 150; i++) {
-        const x = rand(0, CFG.width), h = rand(14, 44), lean = rand(-9, 9);
-        g.beginPath();
-        g.moveTo(x, CFG.height);
-        g.quadraticCurveTo(x + lean * 0.4, CFG.height - h * 0.6, x + lean, CFG.height - h);
-        g.stroke();
-      }
-    }
-    // Hanging growth from the top corners: vines, or ember chains.
-    g.strokeStyle = grotto ? "#33160d" : "#1d1440";
-    g.lineWidth = 3;
-    for (const cornerX of [30, 190, CFG.width - 40, CFG.width - 210]) {
-      const len = rand(70, 150), sway = rand(-16, 16);
-      g.beginPath();
-      g.moveTo(cornerX, -4);
-      g.quadraticCurveTo(cornerX + sway, len * 0.55, cornerX + sway * 0.5, len);
-      g.stroke();
-      g.fillStyle = grotto ? "#b45309" : "#173d2c";
-      for (let k = 0; k < 4; k++) {
-        const t = 0.25 + k * 0.22;
-        g.beginPath();
-        g.ellipse(cornerX + sway * t + rand(-5, 5), len * t, 6, 3.4, rand(0, 3), 0, Math.PI * 2);
-        g.fill();
-      }
-    }
-    return c;
-  },
-
-  arenaName(idx) { return idx === 1 ? "THE EMBER GROTTO" : "THE MIDNIGHT GARDEN"; },
-
-  startRun() {
-    this.score = 0; this.kills = 0;
-    this.combo = 0; this.comboT = 0; this.mult = 1; this.bestMult = 1;
-    this.runTime = 0; this.newBest = false;
-    this.shake = 0; this.hitStopT = 0; this.hurtFlash = 0; this.pendingDraftT = 0;
-    this.lightPulseT = 3; this.arenaIdx = 0; this.explosionDepth = 0;
-    this.player.reset();
-    Upgrades.reset();
-    Enemies.clear(); Boss.clear();
-    EnemyShots.clear(); Bullets.clear();
-    Particles.clear(); Pickups.clear();
-    Director.reset();
-    this.state = "playing";
-    Sound.init();
-    Director.nextWave();
-  },
-
-  onWaveStart(wave, isBoss, event) {
-    this.player.onWaveStart();
-    // The garden shifts arena after every Queen: waves 1-5 in the
-    // Midnight Garden, 6-10 in the Ember Grotto, and so on.
-    const idx = Math.floor((wave - 1) / CFG.bossEvery) % 2;
-    const shifted = idx !== this.arenaIdx && wave > 1;
-    if (shifted) { this.arenaIdx = idx; Sound.sfx("shift"); }
-    const stage = lightStageFor(wave);
-    const newStage = wave > 1 && LIGHT_STAGES.some((s) => s.wave === wave);
-    if (isBoss) HUD.announce("WAVE " + wave, "something vast stirs in the dark", 2.2);
-    else if (newStage) {
-      HUD.announce("THE LIGHT GROWS", stage.name + " — " + stage.note, 2.4);
-      Sound.sfx("kindle");
-    } else if (shifted) HUD.announce(this.arenaName(idx), "the garden shifts — wave " + wave, 2.2);
-    else if (event) HUD.announce("WAVE " + wave + "  -  " + event.name, event.note, 2.2);
-    else HUD.announce("WAVE " + wave, "", 1.6);
-  },
-
-  // DAWNBREAK RING and beyond: the lantern itself fights, pulsing a
-  // ring of light that bites everything standing inside its reach.
-  doLightPulse() {
-    const player = this.player;
-    const stage = lightStageFor(Math.max(1, Director.wave));
-    const radius = player.lightRadius();
-    Particles.ring(player.x, player.y, "#fef9c3", radius, 0.55, 4);
-    Particles.ring(player.x, player.y, "#fcd34d", radius * 0.6, 0.4, 2);
-    Sound.sfx("pulse");
-    for (const e of Enemies.list) {
-      if (!e.alive || e.dying) continue;
-      const rr = radius + e.radius;
-      if (dist2(e.x, e.y, player.x, player.y) < rr * rr) {
-        const res = e.takeHit(stage.pulseDmg, Math.atan2(e.y - player.y, e.x - player.x), null);
-        Particles.burst(e.x, e.y, { n: 4, color: "#fef9c3", speed: 120, size: 2.4, life: 0.3 });
-        if (res === "dead") this.killEnemy(e);
-      }
-    }
-    if (Boss.active && !Boss.dying) {
-      const rr = radius + Boss.radius;
-      if (dist2(Boss.x, Boss.y, player.x, player.y) < rr * rr) {
-        if (Boss.takeHit(stage.pulseDmg, 0, null) === "dead") this.killBoss();
-      }
-    }
-  },
-
-  onWaveClear(wave) {
-    const bonus = 100 * wave;
-    this.score += bonus;
-    Sound.sfx("waveClear");
-    Particles.text(this.player.x, this.player.y - 34, "WAVE CLEAR  +" + bonus, "#fde68a", 19);
-    this.pendingDraftT = 0.95;
-  },
-
-  onBossPhase(phase) {
-    if (phase === 2) HUD.announce("THE QUEEN UNFURLS HER WINGS", "", 1.8);
-    if (phase === 3) {
-      HUD.announce("THE QUEEN ENRAGES", "", 1.8);
-      this.shake = Math.max(this.shake, 9);
-    }
-  },
-
-  openDraft() {
-    this.state = "draft";
-    Upgrades.openDraft(() => {
-      if (this.state !== "draft") return;
-      this.state = "playing";
-      Director.nextWave();
-    });
-  },
-
-  collectPickup(p) {
-    const player = this.player;
-    if (p.kind === "heart") {
-      player.heal(1);
-      Sound.sfx("heal");
-      Particles.text(player.x, player.y - 26, "+1 HEART", "#fda4af", 16);
-      Particles.burst(player.x, player.y, { n: 8, color: "#fda4af", speed: 120, size: 2.6, life: 0.4 });
-    } else {
-      this.score += 15;
-      const b = player.grantBlessing();
-      Sound.sfx("shard");
-      if (b.id === "aegis") Sound.sfx("shieldUp");
-      Particles.text(player.x, player.y - 26, b.name, b.color, 17);
-      Particles.burst(player.x, player.y, { n: 8, color: b.color, speed: 130, size: 2.6, life: 0.4 });
-    }
-  },
-
-  addKillScore(e) {
-    this.combo++;
-    this.comboT = this.player.stats.comboWindow;
-    this.mult = Math.min(this.player.stats.comboMax, 1 + Math.floor(this.combo / CFG.comboPerStep));
-    if (this.mult > this.bestMult) this.bestMult = this.mult;
-    const value = e.def.score * (e.elite ? 3 : 1) * this.mult;
-    this.score += value;
-    if (value >= 100) Particles.text(e.x, e.y - 10, "+" + value, e.elite ? "#ffd75e" : "#fde68a", e.elite ? 19 : 15);
-  },
-
-  killEnemy(e) {
-    if (e.counted) return;
-    e.counted = true;
-    e.alive = false;
-    this.kills++;
-    this.addKillScore(e);
-    const color = e.def.color;
-    Particles.burst(e.x, e.y, { n: e.elite ? 22 : 12, color, speed: e.elite ? 300 : 220, size: 3.2, life: 0.5 });
-    Particles.burst(e.x, e.y, { n: 6, color, speed: 130, size: 3, life: 0.6, petal: true, grav: 160 });
-    if (e.elite) {
-      Particles.ring(e.x, e.y, "#ffd75e", 76, 0.4, 3);
-      this.hitStopT = Math.max(this.hitStopT, 0.085);
-      this.shake = Math.max(this.shake, 6);
-      Sound.sfx("eliteKill");
-    } else {
-      this.hitStopT = Math.max(this.hitStopT, 0.024);
-      if (this.time - this.lastKillSfx > 0.05) { Sound.sfx("kill"); this.lastKillSfx = this.time; }
-    }
-    if (e.type === "splitter") {
-      for (let i = 0; i < 3; i++) {
-        const a = (i / 3) * Math.PI * 2 + rand(0, 1);
-        Enemies.spawn("mini", e.x + Math.cos(a) * 18, e.y + Math.sin(a) * 18, Director.wave, false);
-      }
-    }
-    // WHITE FLAME, the bright blessing's final form: kills burst and
-    // carry the fire to whatever stands too close (chains are capped).
-    if (this.player.stats.explodeKills && this.explosionDepth < 2) {
-      this.explosionDepth++;
-      Particles.ring(e.x, e.y, "#fdba74", 52, 0.3, 3);
-      Particles.burst(e.x, e.y, { n: 8, color: "#fdba74", speed: 240, size: 2.8, life: 0.35 });
-      for (const other of Enemies.list) {
-        if (other === e || !other.alive || other.dying) continue;
-        if (dist2(other.x, other.y, e.x, e.y) < 52 * 52) {
-          if (other.takeHit(1, Math.atan2(other.y - e.y, other.x - e.x), null) === "dead") this.killEnemy(other);
-        }
-      }
-      if (Boss.active && !Boss.dying && dist2(Boss.x, Boss.y, e.x, e.y) < 60 * 60) {
-        if (Boss.takeHit(1, 0, null) === "dead") this.killBoss();
-      }
-      this.explosionDepth--;
-    }
-    // Drops.
-    if (e.elite) {
-      Pickups.drop("shard", e.x, e.y);
-      if (Math.random() < 0.3) Pickups.drop("heart", e.x, e.y);
-    } else if (Math.random() < CFG.shardChance) {
-      Pickups.drop("shard", e.x, e.y);
-    }
-  },
-
-  killBoss() {
-    if (Boss.counted) return;
-    Boss.counted = true;
-    Boss.active = false;
-    this.kills++;
-    this.combo++;
-    this.comboT = this.player.stats.comboWindow;
-    this.mult = Math.min(this.player.stats.comboMax, 1 + Math.floor(this.combo / CFG.comboPerStep));
-    const value = BOSS_DEF.score * this.mult;
-    this.score += value;
-    Particles.text(Boss.x, Boss.y - 60, "+" + value, "#f0abfc", 26);
-    for (const color of ["#e9d5ff", "#c084fc", "#facc15", "#f472b6"]) {
-      Particles.burst(Boss.x, Boss.y, { n: 26, color, speed: 380, size: 3.8, life: 0.8 });
-    }
-    Particles.burst(Boss.x, Boss.y, { n: 18, color: "#e9d5ff", speed: 170, size: 3.4, life: 0.9, petal: true, grav: 150 });
-    Particles.ring(Boss.x, Boss.y, "#e9d5ff", 240, 0.7, 5);
-    Particles.ring(Boss.x, Boss.y, "#facc15", 150, 0.55, 4);
-    this.hitStopT = Math.max(this.hitStopT, 0.22);
-    this.shake = 16;
-    Sound.sfx("bossDie");
-    HUD.announce("THE QUEEN FALLS", "the garden breathes again", 2.4);
-    Pickups.drop("heart", Boss.x, Boss.y);
-    Pickups.drop("shard", Boss.x - 24, Boss.y);
-    Pickups.drop("shard", Boss.x + 24, Boss.y);
-  },
-
-  reapDeaths() {
-    for (const e of Enemies.list) {
-      if (e.alive && e.dying && !e.counted) this.killEnemy(e);
-    }
-    if (Boss.dying && !Boss.counted) this.killBoss();
-  },
-
-  playerStruck() {
-    const res = this.player.hurt();
-    if (res === "shield") return res;
-    if (res === "hit" || res === "dead") {
-      this.combo = Math.floor(this.combo / 2);
-      this.hurtFlash = 0.55;
-      this.shake = Math.max(this.shake, 11);
-      this.hitStopT = Math.max(this.hitStopT, 0.05);
-    }
-    if (res === "dead") {
-      this.state = "dying";
-      this.dyingT = 1.15;
-      Particles.burst(this.player.x, this.player.y, { n: 40, color: "#fbbf24", speed: 330, size: 3.6, life: 0.9 });
-      Particles.burst(this.player.x, this.player.y, { n: 20, color: "#fef3c7", speed: 180, size: 3, life: 1.1, petal: true, grav: 120 });
-      Particles.ring(this.player.x, this.player.y, "#fbbf24", 170, 0.6, 4);
-    }
-    return res;
-  },
-
-  nearestEnemy(x, y, maxDist, exclude) {
-    let bestE = null, bestD = maxDist * maxDist;
-    for (const e of Enemies.list) {
-      if (!e.alive || e.dying || exclude.includes(e)) continue;
-      const d = dist2(x, y, e.x, e.y);
-      if (d < bestD) { bestD = d; bestE = e; }
-    }
-    if (Boss.active && !Boss.dying && !exclude.includes(Boss)) {
-      const d = dist2(x, y, Boss.x, Boss.y);
-      if (d < bestD) { bestE = Boss; }
-    }
-    return bestE;
-  },
-
-  bulletHit(b, target, isBoss) {
-    const angle = Math.atan2(b.vy, b.vx);
-    const stats = this.player.stats;
-    const opts = {
-      burn: stats.burn || this.player.blessingId === "blaze",
-      burnRate: stats.burnRate,
-      chill: stats.chill,
-      chillFactor: stats.chillFactor,
-      chillDur: stats.chillDur,
-    };
-    // PRISM HEART: a foe standing in the lantern's light is light-struck
-    // and takes a quarter more from every spark that finds it.
-    let dmg = b.dmg;
-    const stage = lightStageFor(Math.max(1, Director.wave));
-    if (stage.struck) {
-      const rr = this.player.lightRadius() + target.radius;
-      if (dist2(target.x, target.y, this.player.x, this.player.y) < rr * rr) dmg *= 1.25;
-    }
-    const res = target.takeHit(dmg, angle, opts);
-    b.hits.push(target);
-    Particles.burst(b.x, b.y, { n: 3, color: isBoss ? "#e9d5ff" : target.def.color, speed: 130, size: 2.2, life: 0.25 });
-    if (res === "clank") {
-      Sound.sfx("clank");
-      Particles.burst(b.x, b.y, { n: 4, color: "#d6d3d1", speed: 170, size: 2, life: 0.22 });
-    } else if (this.time - this.lastHitSfx > 0.035) {
-      Sound.sfx("hit");
-      this.lastHitSfx = this.time;
-    }
-    if (res === "dead") {
-      if (isBoss) this.killBoss(); else this.killEnemy(target);
-    }
-    if (b.pierce > 0) { b.pierce--; return; }
-    if (b.bounces > 0) {
-      const next = this.nearestEnemy(b.x, b.y, 265, b.hits);
-      if (next) {
-        const a = Math.atan2(next.y - b.y, next.x - b.x);
-        b.vx = Math.cos(a) * CFG.bulletSpeed;
-        b.vy = Math.sin(a) * CFG.bulletSpeed;
-        b.bounces--;
-        b.life = Math.max(b.life, 0.32);
-        return;
-      }
-    }
-    b.alive = false;
-  },
-
-  collisions(dt) {
-    const player = this.player;
-    // Sparks against the swarm and the Queen.
-    Bullets.pool.forEachAlive((b) => {
-      if (Boss.active && !Boss.dying && !b.hits.includes(Boss)) {
-        const rr = Boss.radius + 5;
-        if (dist2(b.x, b.y, Boss.x, Boss.y) < rr * rr) {
-          this.bulletHit(b, Boss, true);
-          if (!b.alive) return;
-        }
-      }
-      for (const e of Enemies.list) {
-        if (!b.alive) break;
-        if (!e.alive || e.dying || b.hits.includes(e)) continue;
-        const rr = e.radius + 5;
-        if (dist2(b.x, b.y, e.x, e.y) < rr * rr) this.bulletHit(b, e, false);
-      }
-    });
-    // Orbit wisps burn what they touch, on a per-creature cooldown.
-    if (player.orbitPositions.length) {
-      for (const e of Enemies.list) {
-        if (e.orbitT > 0) e.orbitT -= dt;
-        if (!e.alive || e.dying) continue;
-        for (const o of player.orbitPositions) {
-          if (e.orbitT > 0) break;
-          const rr = e.radius + 13;
-          if (dist2(o.x, o.y, e.x, e.y) < rr * rr) {
-            e.orbitT = 0.45;
-            const res = e.takeHit(1, Math.atan2(e.y - player.y, e.x - player.x), null);
-            Particles.burst(o.x, o.y, { n: 4, color: "#7dd3fc", speed: 120, size: 2.2, life: 0.25 });
-            if (res === "dead") this.killEnemy(e);
-          }
-        }
-      }
-      if (Boss.active && !Boss.dying) {
-        if (Boss.orbitT > 0) Boss.orbitT -= dt;
-        for (const o of player.orbitPositions) {
-          if (Boss.orbitT > 0) break;
-          const rr = Boss.radius + 13;
-          if (dist2(o.x, o.y, Boss.x, Boss.y) < rr * rr) {
-            Boss.orbitT = 0.45;
-            if (Boss.takeHit(1, 0, null) === "dead") this.killBoss();
-          }
-        }
-      }
-    }
-    // COMET'S TAIL: a searing dash wounds what it crosses, once per dash.
-    if (player.dashT > 0 && player.stats.dashDamage > 0 && this.state === "playing") {
-      for (const e of Enemies.list) {
-        if (!e.alive || e.dying || e.lastDashId === player.dashId) continue;
-        const rr = e.radius + player.radius + 8;
-        if (dist2(e.x, e.y, player.x, player.y) < rr * rr) {
-          e.lastDashId = player.dashId;
-          const res = e.takeHit(player.stats.dashDamage, Math.atan2(e.y - player.y, e.x - player.x), null);
-          Particles.burst(e.x, e.y, { n: 5, color: "#fcd34d", speed: 150, size: 2.6, life: 0.3 });
-          if (res === "dead") this.killEnemy(e);
-        }
-      }
-      if (Boss.active && !Boss.dying && Boss.lastDashId !== player.dashId) {
-        const rr = Boss.radius + player.radius + 8;
-        if (dist2(Boss.x, Boss.y, player.x, player.y) < rr * rr) {
-          Boss.lastDashId = player.dashId;
-          if (Boss.takeHit(player.stats.dashDamage, 0, null) === "dead") this.killBoss();
-        }
-      }
-    }
-    // Creature contact.
-    if (!player.invulnerable && this.state === "playing") {
-      for (const e of Enemies.list) {
-        if (!e.alive || e.dying || e.spawnT < 0.25) continue;
-        const rr = e.radius + player.radius - 2;
-        if (dist2(e.x, e.y, player.x, player.y) < rr * rr) {
-          const struck = this.playerStruck();
-          if (struck === "shield") {
-            // The shield ate it; the creature bounces off.
-            e.kx += (e.x - player.x) * 6; e.ky += (e.y - player.y) * 6;
-          } else if (e.type === "beetle") {
-            e.takeHit(3, Math.atan2(e.y - player.y, e.x - player.x), null);
-            e.kx += (e.x - player.x) * 10; e.ky += (e.y - player.y) * 10;
-          } else {
-            e.counted = true; e.alive = false;
-            Particles.burst(e.x, e.y, { n: 10, color: e.def.color, speed: 200, size: 3, life: 0.45 });
-          }
-          break;
-        }
-      }
-      if (this.state === "playing" && Boss.active && !Boss.dying && !player.invulnerable) {
-        const rr = Boss.radius + player.radius - 4;
-        if (dist2(Boss.x, Boss.y, player.x, player.y) < rr * rr) this.playerStruck();
-      }
-      // Gloom globs.
-      if (this.state === "playing") {
-        EnemyShots.pool.forEachAlive((s) => {
-          if (player.invulnerable) return;
-          const rr = s.r + player.radius - 3;
-          if (dist2(s.x, s.y, player.x, player.y) < rr * rr) {
-            s.alive = false;
-            this.playerStruck();
-          }
-        });
-      }
-    }
-  },
-
-  frame(rawDt) {
-    this.time += rawDt;
-    let scale = 1;
-    if (this.hitStopT > 0) { this.hitStopT -= rawDt; scale = 0.07; }
-    else if (this.state === "dying") scale = 0.3;
-    const dt = rawDt * scale;
-    this.update(dt, rawDt);
-    this.draw();
-    Input.endFrame();
-  },
-
-  update(dt, rawDt) {
-    HUD.update(rawDt);
-    if (this.hurtFlash > 0) this.hurtFlash -= rawDt * 1.8;
-    if (this.shake > 0) this.shake = Math.max(0, this.shake - rawDt * 34);
-    // Ambient title moths wander in every state; the garden is alive.
-    for (const m of this.ambient) {
-      m.a += rand(-1, 1) * dt * 1.4;
-      m.x += Math.cos(m.a) * m.sp * dt;
-      m.y += Math.sin(m.a) * m.sp * dt;
-      if (m.x < 40 || m.x > CFG.width - 40) m.a = Math.PI - m.a;
-      if (m.y < 40 || m.y > CFG.height - 40) m.a = -m.a;
-      m.x = clamp(m.x, 30, CFG.width - 30);
-      m.y = clamp(m.y, 30, CFG.height - 30);
-    }
-
-    if (Input.wasPressed("KeyM")) Sound.toggleMute();
-
-    switch (this.state) {
-      case "title": {
-        this.intensityTarget = 0.15;
-        Particles.update(dt);
-        if (Input.wasPressed("Enter") || Input.clicked) { Sound.init(); this.startRun(); }
-        break;
-      }
-      case "playing": {
-        this.runTime += dt;
-        if (Input.wasPressed("KeyP") || Input.wasPressed("Escape")) { this.state = "paused"; break; }
-        if (this.comboT > 0) {
-          this.comboT -= dt;
-          if (this.comboT <= 0) { this.combo = 0; this.mult = 1; }
-        }
-        Director.update(dt, this);
-        this.player.update(dt, this);
-        // The light ladder's pulse, once the lantern has learned it.
-        const stageNow = lightStageFor(Math.max(1, Director.wave));
-        if (stageNow.pulse > 0 && Director.phase === "active") {
-          this.lightPulseT -= dt;
-          if (this.lightPulseT <= 0) {
-            this.lightPulseT = stageNow.pulse;
-            this.doLightPulse();
-          }
-        }
-        Enemies.update(dt, this.player);
-        if (Boss.active) Boss.update(dt, this.player, this);
-        Bullets.update(dt);
-        EnemyShots.update(dt);
-        Pickups.update(dt, this);
-        this.collisions(dt);
-        this.reapDeaths();
-        Particles.update(dt);
-        if (this.pendingDraftT > 0) {
-          this.pendingDraftT -= dt;
-          if (this.pendingDraftT <= 0 && this.state === "playing") this.openDraft();
-        }
-        this.intensityTarget = clamp(
-          0.3 + Enemies.activeCount() * 0.016 + (Boss.active ? (Boss.phase === 3 ? 0.42 : 0.28) : 0) +
-          (this.player.hearts === 1 ? 0.1 : 0), 0, 1);
-        break;
-      }
-      case "draft": {
-        this.intensityTarget = 0.22;
-        Particles.update(dt);
-        Upgrades.handleInput(this.player);
-        break;
-      }
-      case "paused": {
-        if (Input.wasPressed("KeyP") || Input.wasPressed("Escape")) this.state = "playing";
-        else if (Input.wasPressed("KeyR")) this.startRun();
-        break;
-      }
-      case "dying": {
-        this.dyingT -= rawDt;
-        Enemies.update(dt, this.player);
-        Particles.update(dt);
-        if (this.dyingT <= 0) {
-          this.state = "gameover";
-          if (this.score > this.best) {
-            this.best = this.score;
-            this.newBest = true;
-            try { localStorage.setItem("mothlight-hollow-queen-best", String(this.best)); } catch (e) { /* private mode */ }
-          }
-          Sound.sfx("gameOver");
-        }
-        break;
-      }
-      case "gameover": {
-        this.intensityTarget = 0.1;
-        Particles.update(dt);
-        Enemies.update(dt, { x: -9999, y: -9999 });
-        if (Input.wasPressed("Enter") || Input.wasPressed("KeyR") || Input.clicked) this.startRun();
-        break;
-      }
-    }
-    Sound.intensity += (this.intensityTarget - Sound.intensity) * Math.min(1, rawDt * 2.5);
-  },
-
-  draw() {
-    const ctx = this.ctx;
-    ctx.save();
-    if (this.shake > 0.2) ctx.translate(rand(-this.shake, this.shake) * 0.5, rand(-this.shake, this.shake) * 0.5);
-    ctx.drawImage(this.arenaIdx === 1 ? this.grottoImg : this.gardenImg, 0, 0);
-    Particles.drawMotes(ctx, this.time);
-    if (this.state === "title") {
-      for (const m of this.ambient) {
-        const img = Sprites.body("moth", false, Math.floor(this.time * 6 + m.seed) % 2);
-        ctx.save();
-        ctx.globalAlpha = 0.75;
-        ctx.translate(m.x, m.y);
-        ctx.rotate(m.a + Math.PI / 2);
-        ctx.drawImage(img, -img.width / 2, -img.height / 2);
-        ctx.restore();
-      }
-      Screens.drawTitle(ctx, this, this.time);
-    } else {
-      Pickups.draw(ctx);
-      EnemyShots.draw(ctx);
-      Enemies.draw(ctx, this.time);
-      Boss.draw(ctx, this.time);
-      Bullets.draw(ctx);
-      if (this.state !== "dying" && this.state !== "gameover") this.player.draw(ctx, this.time);
-      Particles.draw(ctx);
-      if (this.state !== "gameover") HUD.draw(ctx, this, this.time);
-      HUD.drawVignette(ctx, this, this.time);
-      if (this.state === "draft") Upgrades.draw(ctx, this.time);
-      if (this.state === "paused") Screens.drawPause(ctx, this);
-      if (this.state === "gameover") Screens.drawGameOver(ctx, this, this.time);
-    }
-    ctx.restore();
-  },
+const G = {
+  state: "title", prevState: "title",
+  time: 0, playTime: 0,
+  gold: 0, lives: 0, score: 0, kills: 0, goldEarned: 0,
+  wave: 0, hpScale: 1,
+  enemies: [], towers: new Map(),
+  selected: null, buildKind: null,
+  speed: 1, shake: 0, leakFlash: 0,
+  banner: null, tickerText: null, tickerUntil: 0,
+  burns: [], poisonCap: 3, plagueSpread: false,
+  endless: false, demoAt: 0,
+  best: store.get("aetherkeep-best", 0), bestWave: store.get("aetherkeep-bestwave", 0),
 };
+AK.G = G;
 
-window.Mothlight = Game;
-Game.start();
+function say(text, secs = 4) { G.tickerText = text; G.tickerUntil = G.time + secs; }
+function towerKey(c, r) { return c + "," + r; }
+
+function newGame() {
+  G.gold = AK.CFG.START_GOLD; G.lives = AK.CFG.START_LIVES;
+  G.score = 0; G.kills = 0; G.goldEarned = 0; G.playTime = 0;
+  G.wave = 0; G.hpScale = 1; G.enemies = []; G.towers = new Map();
+  G.selected = null; G.buildKind = null; G.speed = 1; G.shake = 0;
+  G.banner = null; G.burns = []; G.endless = false;
+  AK.Waves.init(); AK.Abilities.init(); AK.FX.init(); AK.Projectiles.init();
+  G.state = "play";
+  say("Build your first towers — the road wakes soon. Space calls the wave early.");
+}
+function saveBest() {
+  if (G.score > G.best) { G.best = G.score; store.set("aetherkeep-best", G.best); }
+  if (G.wave > G.bestWave) { G.bestWave = G.wave; store.set("aetherkeep-bestwave", G.bestWave); }
+}
+G.winGame = function () {
+  G.score += G.lives * 50; saveBest();
+  G.state = "win"; AK.Audio.win();
+  AK.FX.ring(790, 434, "#a8ffc4", 500, 5);
+};
+function loseGame() {
+  saveBest(); G.state = "over"; AK.Audio.lose(); G.shake = 14;
+}
+
+// ---- economy actions -------------------------------------------------
+function placeTower(kind, c, r) {
+  const def = AK.TOWERS[kind];
+  if (G.gold < def.cost) { AK.Audio.denied(); say(`Not enough gold for the ${def.name} (${def.cost}g).`); return false; }
+  if (!AK.Map.buildable(c, r) || G.towers.has(towerKey(c, r))) { AK.Audio.denied(); return false; }
+  const t = new AK.Tower(kind, c, r);
+  G.towers.set(towerKey(c, r), t);
+  G.gold -= def.cost;
+  AK.Audio.place();
+  AK.FX.ring(t.x, t.y, def.color, 190, 3);
+  AK.FX.burst(t.x, t.y, "#cfe4ff", 8, 90, 0.35, 2.4);
+  refreshVenomFlags();
+  return true;
+}
+function refreshVenomFlags() {
+  let asc = false;
+  for (const t of G.towers.values()) if (t.kind === "venom" && t.ascended) asc = true;
+  G.plagueSpread = asc; G.poisonCap = asc ? 5 : 3;
+}
+function upgradeSelected() {
+  const t = G.selected; if (!t) return;
+  if (t.ascended) return;
+  if (t.level < 3) {
+    const cost = t.upgradeCost();
+    if (G.gold < cost) { AK.Audio.denied(); return; }
+    G.gold -= cost; t.invested += cost; t.level++;
+    AK.Audio.upgrade(); AK.FX.ring(t.x, t.y, "#ffe98a", 220, 3);
+    AK.FX.text(t.x, t.y - 30, `LV${t.level}`, "#ffe98a", 14);
+  } else {
+    const cost = t.def.ascend.cost;
+    if (G.gold < cost) { AK.Audio.denied(); return; }
+    G.gold -= cost; t.invested += cost; t.ascended = true;
+    AK.Audio.ascend(); AK.FX.ring(t.x, t.y, "#fff3a0", 340, 4);
+    AK.FX.text(t.x, t.y - 34, t.def.ascend.name, "#fff3a0", 15);
+    G.banner = { text: t.def.ascend.name, sub: `${t.def.name} wakes its final form`, until: G.time + 1.6 };
+    refreshVenomFlags();
+  }
+}
+function sellSelected() {
+  const t = G.selected; if (!t) return;
+  G.gold += t.sellValue();
+  G.towers.delete(towerKey(t.c, t.r));
+  G.selected = null;
+  AK.Audio.sell(); AK.FX.burst(t.x, t.y, "#ffd75e", 10, 110, 0.4, 2.6);
+  refreshVenomFlags();
+}
+
+// ---- routing -----------------------------------------------------------
+function hudAction(a) {
+  if (!a) return false;
+  AK.Audio.click();
+  if (a.startsWith("build:")) {
+    const kind = a.slice(6);
+    G.buildKind = G.buildKind === kind ? null : kind;
+    G.selected = null;
+  } else if (a === "upgrade" || a === "ascend") upgradeSelected();
+  else if (a === "sell") sellSelected();
+  else if (a === "mode") {
+    const t = G.selected;
+    if (t) { const i = AK.TOWER_MODES.indexOf(t.mode); t.mode = AK.TOWER_MODES[(i + 1) % AK.TOWER_MODES.length]; }
+  }
+  else if (a === "meteor") AK.Abilities.aimMeteor();
+  else if (a === "blizzard") AK.Abilities.castBlizzard();
+  else if (a === "startwave") AK.Waves.startWave(true);
+  else if (a === "speed") G.speed = G.speed === 1 ? 2 : 1;
+  else if (a === "pause") G.state = G.state === "pause" ? "play" : "pause";
+  else if (a === "mute") AK.Audio.muted = !AK.Audio.muted;
+  else if (a === "help") { G.prevState = G.state; G.state = "help"; }
+  return true;
+}
+function screenHit(x, y) {
+  for (const b of AK.Screens.buttons) {
+    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b.action;
+  }
+  return null;
+}
+function onClick() {
+  const { x, y } = AK.Input;
+  if (G.state === "title") { newGame(); return; }
+  if (G.state === "help") { G.state = G.prevState; return; }
+  if (G.state === "over") { if (screenHit(x, y) === "restart") newGame(); return; }
+  if (G.state === "win") {
+    const a = screenHit(x, y);
+    if (a === "restart") newGame();
+    else if (a === "endless") {
+      G.endless = true; G.state = "play";
+      AK.Waves.phase = "intermission"; AK.Waves.timer = 8;
+      say("Endless: the road keeps coming. How long can the crystal hold?");
+    }
+    return;
+  }
+  if (G.state === "pause") { hudAction(AK.HUD.hit(x, y)); return; }
+  // play
+  if (AK.Abilities.aiming) {
+    const tile = AK.Map.tileAt(x, y);
+    if (tile) { AK.Abilities.castMeteorAt(x, y); return; }
+    AK.Abilities.aiming = false; return;
+  }
+  if (hudAction(AK.HUD.hit(x, y))) return;
+  const tile = AK.Map.tileAt(x, y);
+  if (G.buildKind) {
+    if (tile && placeTower(G.buildKind, tile.c, tile.r)) {
+      if (!AK.Input.keys["ShiftLeft"] && !AK.Input.keys["ShiftRight"]) G.buildKind = null;
+    } else if (!tile) G.buildKind = null;
+    return;
+  }
+  if (tile && G.towers.has(towerKey(tile.c, tile.r))) {
+    G.selected = G.towers.get(towerKey(tile.c, tile.r));
+    AK.Audio.click();
+  } else G.selected = null;
+}
+function onRightClick() {
+  if (G.state !== "play") return;
+  if (AK.Abilities.aiming) AK.Abilities.aiming = false;
+  else if (G.buildKind) G.buildKind = null;
+  else G.selected = null;
+}
+function onKeys() {
+  const P = (c) => AK.Input.wasPressed(c);
+  if (G.state === "title" && (P("Enter") || P("Space"))) { newGame(); return; }
+  if ((G.state === "over" || G.state === "win") && P("KeyR")) { newGame(); return; }
+  if (G.state === "win" && P("KeyE")) { G.endless = true; G.state = "play"; AK.Waves.phase = "intermission"; AK.Waves.timer = 8; return; }
+  if (P("KeyH")) { if (G.state === "help") G.state = G.prevState; else if (G.state === "play" || G.state === "title" || G.state === "pause") { G.prevState = G.state; G.state = "help"; } return; }
+  if (G.state === "help") { if (P("Escape")) G.state = G.prevState; return; }
+  if (G.state !== "play" && G.state !== "pause") return;
+  if (P("KeyP") || P("Escape")) {
+    if (G.state === "play" && P("Escape") && (G.buildKind || G.selected || AK.Abilities.aiming)) { onRightClick(); return; }
+    G.state = G.state === "pause" ? "play" : "pause"; return;
+  }
+  if (G.state !== "play") return;
+  if (P("Space")) AK.Waves.startWave(true);
+  if (P("KeyF")) G.speed = G.speed === 1 ? 2 : 1;
+  if (P("KeyM")) AK.Audio.muted = !AK.Audio.muted;
+  if (P("KeyQ")) { if (AK.Abilities.aiming) AK.Abilities.aiming = false; else AK.Abilities.aimMeteor(); }
+  if (P("KeyW")) AK.Abilities.castBlizzard();
+  for (const kind of AK.TOWER_ORDER) {
+    if (P("Digit" + AK.TOWERS[kind].key)) { G.buildKind = G.buildKind === kind ? null : kind; G.selected = null; }
+  }
+}
+
+// ---- simulation --------------------------------------------------------
+function updatePlay(dt) {
+  G.playTime += dt;
+  AK.Waves.update(dt);
+  for (const t of G.towers.values()) t.update(dt);
+  AK.Projectiles.update(dt);
+  AK.Abilities.update(dt);
+  // burning ground
+  for (let i = G.burns.length - 1; i >= 0; i--) {
+    const b = G.burns[i];
+    if (G.time > b.until) { G.burns.splice(i, 1); continue; }
+    for (const e of G.enemies) {
+      if (e.alive && AK.dist2(e.x, e.y, b.x, b.y) < b.r * b.r) e.damage(b.dps * dt, "poison");
+    }
+  }
+  for (const e of G.enemies) if (e.alive) e.update(dt);
+  // leaks and cleanup
+  let lost = false;
+  G.enemies = G.enemies.filter((e) => {
+    if (e.leaked) {
+      G.lives -= e.def.leak; G.leakFlash = AK.CFG.LEAK_FLASH; G.shake = Math.max(G.shake, 8);
+      AK.Audio.leak();
+      AK.FX.text(810, 434, `-${e.def.leak} ♥`, "#ff5d7a", 17);
+      lost = true;
+      return false;
+    }
+    return e.alive;
+  });
+  if (lost && G.lives <= 0) { G.lives = 0; loseGame(); }
+  const threat = AK.clamp(G.enemies.length / 16, 0, 1);
+  AK.Audio.music(threat);
+}
+function updateTitle(dt) {
+  // a quiet parade walks the road behind the title
+  G.demoAt -= dt;
+  if (G.demoAt <= 0 && G.enemies.length < 9) {
+    G.demoAt = 1.1;
+    G.enemies.push(new AK.Enemy(AK.pick(["mite", "grunt", "runner", "wraith", "bulwark", "mender", "splitter"]), 1));
+  }
+  for (const e of G.enemies) if (e.alive) e.update(dt);
+  G.enemies = G.enemies.filter((e) => e.alive && !e.leaked);
+}
+function update(dt) {
+  G.time += dt;
+  if (G.tickerText && G.time > G.tickerUntil) G.tickerText = null;
+  if (G.leakFlash > 0) G.leakFlash -= dt;
+  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt * 26);
+  if (AK.Input.clicked) onClick();
+  if (AK.Input.rightClicked) onRightClick();
+  onKeys();
+  if (G.state === "play") updatePlay(dt * G.speed);
+  else if (G.state === "title") updateTitle(dt);
+  AK.FX.update(dt);
+  AK.Input.flush();
+}
+
+// ---- render --------------------------------------------------------------
+function drawPlacement(ctx) {
+  const { x, y } = AK.Input;
+  if (G.buildKind) {
+    const def = AK.TOWERS[G.buildKind], tile = AK.Map.tileAt(x, y);
+    if (tile) {
+      const c = AK.Map.tileCenter(tile.c, tile.r);
+      const ok = AK.Map.buildable(tile.c, tile.r) && !G.towers.has(towerKey(tile.c, tile.r)) && G.gold >= def.cost;
+      ctx.strokeStyle = ok ? "rgba(140,255,170,0.9)" : "rgba(255,93,122,0.9)";
+      ctx.lineWidth = 2; ctx.strokeRect(tile.c * 64 + AK.CFG.MAP_X + 2, tile.r * 64 + AK.CFG.MAP_Y + 2, 60, 60);
+      ctx.fillStyle = ok ? "rgba(140,255,170,0.10)" : "rgba(255,93,122,0.10)";
+      ctx.beginPath(); ctx.arc(c.x, c.y, def.range, 0, 7); ctx.fill();
+      ctx.strokeStyle = "rgba(220,240,255,0.35)";
+      ctx.beginPath(); ctx.arc(c.x, c.y, def.range, 0, 7); ctx.stroke();
+      ctx.globalAlpha = 0.65;
+      const img = AK.SPR.tower[G.buildKind][0];
+      ctx.drawImage(img, c.x - 32, c.y - 32, 64, 64);
+      ctx.globalAlpha = 1;
+    }
+  }
+  if (G.selected) {
+    const t = G.selected;
+    ctx.fillStyle = "rgba(159,192,255,0.08)";
+    ctx.beginPath(); ctx.arc(t.x, t.y, t.range(), 0, 7); ctx.fill();
+    ctx.strokeStyle = "rgba(159,192,255,0.55)"; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.arc(t.x, t.y, t.range(), 0, 7); ctx.stroke();
+    ctx.strokeStyle = "#ffe98a"; ctx.lineWidth = 2;
+    ctx.strokeRect(t.c * 64 + AK.CFG.MAP_X + 2, t.r * 64 + AK.CFG.MAP_Y + 2, 60, 60);
+  }
+}
+function drawBurns(ctx) {
+  for (const b of G.burns) {
+    const a = AK.clamp((b.until - G.time) / 2.2, 0, 1);
+    ctx.fillStyle = `rgba(255,110,40,${0.16 * a + 0.05})`;
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, 7); ctx.fill();
+    if (Math.random() < 0.3) AK.FX.trail(b.x + AK.rand(-b.r, b.r) * 0.6, b.y + AK.rand(-b.r, b.r) * 0.6, "#ff8a4d", 3.4);
+  }
+}
+function render() {
+  ctx.clearRect(0, 0, AK.CFG.W, AK.CFG.H);
+  ctx.save();
+  if (G.shake > 0.2) ctx.translate(AK.rand(-G.shake, G.shake) * 0.5, AK.rand(-G.shake, G.shake) * 0.5);
+  AK.Map.draw(ctx, G.time);
+  drawBurns(ctx);
+  for (const t of G.towers.values()) t.draw(ctx);
+  const sorted = [...G.enemies].sort((a, b) => a.y - b.y);
+  for (const e of sorted) if (e.alive) e.draw(ctx);
+  AK.Projectiles.draw(ctx);
+  AK.Abilities.draw(ctx);
+  AK.FX.draw(ctx);
+  ctx.restore();
+  if (G.state === "title") { AK.Screens.drawTitle(ctx, G); return; }
+  if (G.state === "help") { AK.Screens.drawHelp(ctx, G); return; }
+  AK.HUD.draw(ctx);
+  AK.Screens.bossBar(ctx, G);
+  if (G.state === "play") drawPlacement(ctx);
+  if (G.state === "pause") AK.Screens.drawPause(ctx);
+  if (G.state === "over") AK.Screens.drawOver(ctx, G);
+  if (G.state === "win") AK.Screens.drawWin(ctx, G);
+  if (G.leakFlash > 0) {
+    ctx.fillStyle = `rgba(255,40,70,${G.leakFlash * 0.16})`;
+    ctx.fillRect(0, 0, AK.CFG.W, AK.CFG.H);
+  }
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  update(dt);
+  render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---- staging hooks for the play-test and screenshots ---------------------
+function stageTower(kind, c, r, level = 1, ascended = false) {
+  const t = new AK.Tower(kind, c, r);
+  t.level = level; t.ascended = ascended;
+  t.invested = t.def.cost * (1 + level);
+  G.towers.set(towerKey(c, r), t);
+  refreshVenomFlags();
+  return t;
+}
+function stageDefense() {
+  stageTower("bolt", 5, 1, 2);
+  stageTower("frost", 9, 3, 3);
+  stageTower("storm", 4, 4, 3, true);
+  stageTower("mortar", 8, 6, 2);
+  stageTower("venom", 3, 7, 2);
+  stageTower("lance", 10, 9, 3);
+  stageTower("bolt", 6, 9, 1);
+  stageTower("frost", 5, 6, 1);
+}
+window.__AK = {
+  G, newGame,
+  setGold(n) { G.gold = n; },
+  place: stageTower,
+  stageDefense,
+  startWave() { AK.Waves.startWave(false); },
+  jumpToWave(n) { G.wave = n - 1; AK.Waves.phase = "intermission"; AK.Waves.timer = 0.05; },
+  meteorAt(x, y) { AK.Abilities.pending.push({ x, y, t: 0.5 }); },
+  fireAll() { for (const t of G.towers.values()) { t.cd = 0; t.update(0.001); } },
+  spawnTitan(dist) { const b = new AK.Enemy("titan", G.hpScale, dist); G.enemies.push(b); return b; },
+  win() { G.kills = 612; G.goldEarned = 4210; G.playTime = 1085; G.score = 9840; G.wave = 20; G.winGame(); },
+  state() { return { state: G.state, gold: G.gold, lives: G.lives, wave: G.wave, foes: G.enemies.length, towers: G.towers.size, score: G.score }; },
+};

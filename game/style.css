@@ -1,45 +1,16 @@
-/* style.css — the page frame around the canvas: a dark room, a lit
-   stage. The game itself is painted entirely by the scripts. */
-
-* { box-sizing: border-box; }
-
 html, body {
-  margin: 0;
-  padding: 0;
-  min-height: 100%;
-  background: #07050f radial-gradient(1200px 700px at 50% 30%, #171038 0%, #07050f 70%);
-  color: #ddd6fe;
-  font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  margin: 0; padding: 0; background: #07090f; height: 100%;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: #dfe8ff;
 }
-
 #frame {
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 18px 10px;
+  min-height: 100vh; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 10px;
+  background: radial-gradient(1200px 700px at 50% 38%, #101a30 0%, #07090f 62%);
 }
-
-#game {
-  width: min(1280px, 98vw);
-  height: auto;
-  aspect-ratio: 1280 / 800;
-  display: block;
-  border: 1px solid rgba(196, 181, 253, 0.35);
-  border-radius: 10px;
-  box-shadow: 0 0 0 4px rgba(10, 6, 24, 0.9), 0 18px 60px rgba(0, 0, 0, 0.65), 0 0 90px rgba(245, 158, 11, 0.12);
-  background: #0d0724;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
+canvas {
+  width: min(96vw, 1280px); height: auto; aspect-ratio: 1280 / 800;
+  border: 1px solid #2b3d63; border-radius: 10px;
+  box-shadow: 0 0 0 1px #0a0e18, 0 18px 60px rgba(0, 0, 0, .65), 0 0 42px rgba(84, 140, 255, .12);
+  background: #0a0f1c; cursor: crosshair; touch-action: none;
 }
-
-#caption {
-  margin: 0;
-  font-size: 13px;
-  letter-spacing: 0.04em;
-  color: #8b7fb8;
-  text-align: center;
-}
+#hint { font-size: 12.5px; color: #7e8db0; letter-spacing: .02em; }
